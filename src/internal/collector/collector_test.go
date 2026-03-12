@@ -348,7 +348,7 @@ func TestCollector_NICMetrics(t *testing.T) {
 	metrics := collectMetrics(c)
 
 	// NIC info
-	nicInfo := metrics["pve_kvm_nic"]
+	nicInfo := metrics["pve_kvm_nic_info"]
 	if len(nicInfo) != 1 {
 		t.Fatalf("expected 1 nic info, got %d", len(nicInfo))
 	}
