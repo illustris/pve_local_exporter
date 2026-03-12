@@ -17,6 +17,7 @@ type Config struct {
 	QMRand             time.Duration
 	QMMonitorDeferClose bool
 	ShowVersion        bool
+	Version            string
 }
 
 func Parse() Config {

@@ -21,6 +21,7 @@ var version string
 
 func main() {
 	cfg := config.Parse()
+	cfg.Version = version
 
 	if cfg.ShowVersion {
 		fmt.Println(version)

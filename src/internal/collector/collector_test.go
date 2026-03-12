@@ -87,6 +87,17 @@ func (m *mockFileReader) ReadFile(path string) (string, error) {
 	return m.files[path], nil
 }
 
+// metricValue extracts the numeric value from a dto.Metric, whether it is a Gauge or Counter.
+func metricValue(m *dto.Metric) float64 {
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	if m.Counter != nil {
+		return m.Counter.GetValue()
+	}
+	return 0
+}
+
 // collectMetrics collects all metrics from a collector into a map keyed by metric name.
 func collectMetrics(c prometheus.Collector) map[string][]*dto.Metric {
 	ch := make(chan prometheus.Metric, 200)
@@ -182,54 +193,60 @@ func TestCollector_BasicVMMetrics(t *testing.T) {
 	c := NewWithDeps(cfg, proc, sys, qm, &mockStatFS{}, &mockCmdRunner{}, fr)
 	metrics := collectMetrics(c)
 
-	// Check CPU metrics
-	cpuMetrics := metrics["pve_kvm_cpu"]
+	// Check CPU metrics (counter)
+	cpuMetrics := metrics["pve_kvm_cpu_seconds_total"]
 	if len(cpuMetrics) != 3 {
 		t.Fatalf("expected 3 cpu metrics, got %d", len(cpuMetrics))
 	}
 	m := findMetricWithLabels(cpuMetrics, map[string]string{"mode": "user"})
-	if m == nil || m.Gauge.GetValue() != 5.0 {
+	if m == nil || metricValue(m) != 5.0 {
 		t.Errorf("cpu user = %v", m)
 	}
 	m = findMetricWithLabels(cpuMetrics, map[string]string{"mode": "system"})
-	if m == nil || m.Gauge.GetValue() != 2.0 {
+	if m == nil || metricValue(m) != 2.0 {
 		t.Errorf("cpu system = %v", m)
 	}
 	m = findMetricWithLabels(cpuMetrics, map[string]string{"mode": "iowait"})
-	if m == nil || m.Gauge.GetValue() != 0.5 {
+	if m == nil || metricValue(m) != 0.5 {
 		t.Errorf("cpu iowait = %v", m)
 	}
 
 	// Check vcores
 	vcoreMetrics := metrics["pve_kvm_vcores"]
-	if len(vcoreMetrics) != 1 || vcoreMetrics[0].Gauge.GetValue() != 4 {
+	if len(vcoreMetrics) != 1 || metricValue(vcoreMetrics[0]) != 4 {
 		t.Errorf("vcores = %v", vcoreMetrics)
 	}
 
 	// Check threads
 	threadMetrics := metrics["pve_kvm_threads"]
-	if len(threadMetrics) != 1 || threadMetrics[0].Gauge.GetValue() != 50 {
+	if len(threadMetrics) != 1 || metricValue(threadMetrics[0]) != 50 {
 		t.Errorf("threads = %v", threadMetrics)
 	}
 
 	// Check memory percent
 	memPctMetrics := metrics["pve_kvm_memory_percent"]
-	if len(memPctMetrics) != 1 || memPctMetrics[0].Gauge.GetValue() != 25.5 {
+	if len(memPctMetrics) != 1 || metricValue(memPctMetrics[0]) != 25.5 {
 		t.Errorf("memory_percent = %v", memPctMetrics)
 	}
 
-	// Check IO
-	if m := metrics["pve_kvm_io_read_count"]; len(m) != 1 || m[0].Gauge.GetValue() != 10 {
-		t.Errorf("io_read_count = %v", m)
-	}
-	if m := metrics["pve_kvm_io_write_bytes"]; len(m) != 1 || m[0].Gauge.GetValue() != 1000 {
-		t.Errorf("io_write_bytes = %v", m)
+	// Check maxmem (renamed with _bytes)
+	maxmemMetrics := metrics["pve_kvm_maxmem_bytes"]
+	if len(maxmemMetrics) != 1 || metricValue(maxmemMetrics[0]) != float64(4194304*1024) {
+		t.Errorf("maxmem_bytes = %v", maxmemMetrics)
 	}
 
-	// Check context switches
-	csMetrics := metrics["pve_kvm_ctx_switches"]
+	// Check IO (counters, renamed with _total)
+	if m := metrics["pve_kvm_io_read_count_total"]; len(m) != 1 || metricValue(m[0]) != 10 {
+		t.Errorf("io_read_count_total = %v", m)
+	}
+	if m := metrics["pve_kvm_io_write_bytes_total"]; len(m) != 1 || metricValue(m[0]) != 1000 {
+		t.Errorf("io_write_bytes_total = %v", m)
+	}
+
+	// Check context switches (counter, renamed with _total)
+	csMetrics := metrics["pve_kvm_ctx_switches_total"]
 	if len(csMetrics) != 2 {
-		t.Fatalf("expected 2 ctx_switches metrics, got %d", len(csMetrics))
+		t.Fatalf("expected 2 ctx_switches_total metrics, got %d", len(csMetrics))
 	}
 
 	// Check VM info metric
@@ -240,6 +257,16 @@ func TestCollector_BasicVMMetrics(t *testing.T) {
 	m = findMetricWithLabels(infoMetrics, map[string]string{"id": "100", "name": "testvm", "pool": "prod"})
 	if m == nil {
 		t.Error("kvm info metric not found with expected labels")
+	}
+
+	// Check scrape duration exists
+	if sd := metrics["pve_scrape_duration_seconds"]; len(sd) != 1 {
+		t.Errorf("expected 1 scrape_duration_seconds, got %d", len(sd))
+	}
+
+	// Check build info exists
+	if bi := metrics["pve_exporter_build_info"]; len(bi) != 1 {
+		t.Errorf("expected 1 build_info, got %d", len(bi))
 	}
 }
 
@@ -267,16 +294,16 @@ func TestCollector_StorageMetrics(t *testing.T) {
 
 	metrics := collectMetrics(c)
 
-	// Check storage size
-	sizeMetrics := metrics["pve_node_storage_size"]
-	if len(sizeMetrics) != 1 || sizeMetrics[0].Gauge.GetValue() != 1e9 {
-		t.Errorf("storage_size = %v", sizeMetrics)
+	// Check storage size (renamed with _bytes)
+	sizeMetrics := metrics["pve_node_storage_size_bytes"]
+	if len(sizeMetrics) != 1 || metricValue(sizeMetrics[0]) != 1e9 {
+		t.Errorf("storage_size_bytes = %v", sizeMetrics)
 	}
 
-	// Check storage free
-	freeMetrics := metrics["pve_node_storage_free"]
-	if len(freeMetrics) != 1 || freeMetrics[0].Gauge.GetValue() != 5e8 {
-		t.Errorf("storage_free = %v", freeMetrics)
+	// Check storage free (renamed with _bytes)
+	freeMetrics := metrics["pve_node_storage_free_bytes"]
+	if len(freeMetrics) != 1 || metricValue(freeMetrics[0]) != 5e8 {
+		t.Errorf("storage_free_bytes = %v", freeMetrics)
 	}
 
 	// Check storage info
@@ -326,14 +353,14 @@ func TestCollector_NICMetrics(t *testing.T) {
 		t.Fatalf("expected 1 nic info, got %d", len(nicInfo))
 	}
 
-	// NIC stats
-	rxBytes := metrics["pve_kvm_nic_rx_bytes"]
-	if len(rxBytes) != 1 || rxBytes[0].Gauge.GetValue() != 1000 {
-		t.Errorf("rx_bytes = %v", rxBytes)
+	// NIC stats (counter, renamed with _total)
+	rxBytes := metrics["pve_kvm_nic_rx_bytes_total"]
+	if len(rxBytes) != 1 || metricValue(rxBytes[0]) != 1000 {
+		t.Errorf("rx_bytes_total = %v", rxBytes)
 	}
-	txBytes := metrics["pve_kvm_nic_tx_bytes"]
-	if len(txBytes) != 1 || txBytes[0].Gauge.GetValue() != 2000 {
-		t.Errorf("tx_bytes = %v", txBytes)
+	txBytes := metrics["pve_kvm_nic_tx_bytes_total"]
+	if len(txBytes) != 1 || metricValue(txBytes[0]) != 2000 {
+		t.Errorf("tx_bytes_total = %v", txBytes)
 	}
 }
 
@@ -409,8 +436,43 @@ func TestCollector_ProcessDiscoveryError(t *testing.T) {
 
 	metrics := collectMetrics(c)
 
-	// No VM metrics should be emitted
-	if len(metrics) != 0 {
-		t.Errorf("expected 0 metrics on discovery error, got %d metric names", len(metrics))
+	// No VM metrics should be emitted, but scrape_duration + build_info are always present
+	expectedNames := map[string]bool{
+		"pve_scrape_duration_seconds": true,
+		"pve_exporter_build_info":     true,
+	}
+	for name := range metrics {
+		if !expectedNames[name] {
+			t.Errorf("unexpected metric %q on discovery error", name)
+		}
+	}
+	if len(metrics) != 2 {
+		t.Errorf("expected 2 metrics (scrape_duration + build_info) on discovery error, got %d", len(metrics))
+	}
+}
+
+func TestCollector_BuildInfo(t *testing.T) {
+	cfg := config.Config{
+		CollectRunningVMs: false,
+		CollectStorage:    false,
+		MetricsPrefix:     "pve",
+		Version:           "1.2.3",
+	}
+
+	c := NewWithDeps(cfg, &mockProcReader{}, &mockSysReader{}, &mockQMMonitor{responses: map[string]string{}},
+		&mockStatFS{}, &mockCmdRunner{}, &mockFileReader{files: map[string]string{}})
+
+	metrics := collectMetrics(c)
+
+	bi := metrics["pve_exporter_build_info"]
+	if len(bi) != 1 {
+		t.Fatalf("expected 1 build_info metric, got %d", len(bi))
+	}
+	if metricValue(bi[0]) != 1 {
+		t.Errorf("build_info value = %v, want 1", metricValue(bi[0]))
+	}
+	m := findMetricWithLabels(bi, map[string]string{"version": "1.2.3"})
+	if m == nil {
+		t.Error("build_info missing version label")
 	}
 }

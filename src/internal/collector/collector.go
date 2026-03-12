@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -51,6 +52,18 @@ type PVECollector struct {
 	descDiskSize     *prometheus.Desc
 	descStorageSize  *prometheus.Desc
 	descStorageFree  *prometheus.Desc
+
+	// IO counter descriptors (counters).
+	descIOReadCount  *prometheus.Desc
+	descIOReadBytes  *prometheus.Desc
+	descIOReadChars  *prometheus.Desc
+	descIOWriteCount *prometheus.Desc
+	descIOWriteBytes *prometheus.Desc
+	descIOWriteChars *prometheus.Desc
+
+	// Operational metrics.
+	descScrapeDuration *prometheus.Desc
+	descBuildInfo      *prometheus.Desc
 }
 
 type poolData struct {
@@ -119,18 +132,28 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 		fileReader: fr,
 		prefix:     p,
 
-		descCPU:         prometheus.NewDesc(p+"_kvm_cpu", "KVM CPU time", []string{"id", "mode"}, nil),
+		descCPU:         prometheus.NewDesc(p+"_kvm_cpu_seconds_total", "KVM CPU time", []string{"id", "mode"}, nil),
 		descVcores:      prometheus.NewDesc(p+"_kvm_vcores", "vCores allocated", []string{"id"}, nil),
-		descMaxmem:      prometheus.NewDesc(p+"_kvm_maxmem", "Maximum memory bytes", []string{"id"}, nil),
+		descMaxmem:      prometheus.NewDesc(p+"_kvm_maxmem_bytes", "Maximum memory bytes", []string{"id"}, nil),
 		descMemPct:      prometheus.NewDesc(p+"_kvm_memory_percent", "Memory percent of host", []string{"id"}, nil),
 		descMemExt:      prometheus.NewDesc(p+"_kvm_memory_extended", "Extended memory info", []string{"id", "type"}, nil),
 		descThreads:     prometheus.NewDesc(p+"_kvm_threads", "Threads used", []string{"id"}, nil),
-		descCtxSwitches: prometheus.NewDesc(p+"_kvm_ctx_switches", "Context switches", []string{"id", "type"}, nil),
+		descCtxSwitches: prometheus.NewDesc(p+"_kvm_ctx_switches_total", "Context switches", []string{"id", "type"}, nil),
 		descNicInfo:     prometheus.NewDesc(p+"_kvm_nic", "NIC info", []string{"id", "ifname", "netdev", "queues", "type", "model", "macaddr"}, nil),
 		descNicQueues:   prometheus.NewDesc(p+"_kvm_nic_queues", "NIC queue count", []string{"id", "ifname"}, nil),
-		descDiskSize:    prometheus.NewDesc(p+"_kvm_disk_size", "Disk size bytes", []string{"id", "disk_name"}, nil),
-		descStorageSize: prometheus.NewDesc(p+"_node_storage_size", "Storage total size", []string{"name", "type"}, nil),
-		descStorageFree: prometheus.NewDesc(p+"_node_storage_free", "Storage free space", []string{"name", "type"}, nil),
+		descDiskSize:    prometheus.NewDesc(p+"_kvm_disk_size_bytes", "Disk size bytes", []string{"id", "disk_name"}, nil),
+		descStorageSize: prometheus.NewDesc(p+"_node_storage_size_bytes", "Storage total size", []string{"name", "type"}, nil),
+		descStorageFree: prometheus.NewDesc(p+"_node_storage_free_bytes", "Storage free space", []string{"name", "type"}, nil),
+
+		descIOReadCount:  prometheus.NewDesc(p+"_kvm_io_read_count_total", "Read system calls by KVM process", []string{"id"}, nil),
+		descIOReadBytes:  prometheus.NewDesc(p+"_kvm_io_read_bytes_total", "Bytes read from disk by KVM process", []string{"id"}, nil),
+		descIOReadChars:  prometheus.NewDesc(p+"_kvm_io_read_chars_total", "Bytes read including buffers by KVM process", []string{"id"}, nil),
+		descIOWriteCount: prometheus.NewDesc(p+"_kvm_io_write_count_total", "Write system calls by KVM process", []string{"id"}, nil),
+		descIOWriteBytes: prometheus.NewDesc(p+"_kvm_io_write_bytes_total", "Bytes written to disk by KVM process", []string{"id"}, nil),
+		descIOWriteChars: prometheus.NewDesc(p+"_kvm_io_write_chars_total", "Bytes written including buffers by KVM process", []string{"id"}, nil),
+
+		descScrapeDuration: prometheus.NewDesc(p+"_scrape_duration_seconds", "Duration of metrics collection", nil, nil),
+		descBuildInfo:      prometheus.NewDesc(p+"_exporter_build_info", "Build information", []string{"version"}, nil),
 	}
 	c.poolCache = cache.NewMtimeCache[poolData]("/etc/pve/user.cfg", fileMtime)
 	c.storageCache = cache.NewMtimeCache[[]pveconfig.StorageEntry]("/etc/pve/storage.cfg", fileMtime)
@@ -143,12 +166,17 @@ func (c *PVECollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *PVECollector) Collect(ch chan<- prometheus.Metric) {
+	start := time.Now()
+
 	if c.cfg.CollectRunningVMs {
 		c.collectVMs(ch)
 	}
 	if c.cfg.CollectStorage {
 		c.collectStorage(ch)
 	}
+
+	ch <- prometheus.MustNewConstMetric(c.descScrapeDuration, prometheus.GaugeValue, time.Since(start).Seconds())
+	ch <- prometheus.MustNewConstMetric(c.descBuildInfo, prometheus.GaugeValue, 1, c.cfg.Version)
 }
 
 func (c *PVECollector) collectVMs(ch chan<- prometheus.Metric) {
@@ -203,7 +231,7 @@ func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs
 			{"system", cpu.System},
 			{"iowait", cpu.IOWait},
 		} {
-			ch <- prometheus.MustNewConstMetric(c.descCPU, prometheus.GaugeValue, m.val, id, m.mode)
+			ch <- prometheus.MustNewConstMetric(c.descCPU, prometheus.CounterValue, m.val, id, m.mode)
 		}
 	}
 
@@ -229,28 +257,18 @@ func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs
 		ch <- prometheus.MustNewConstMetric(c.descThreads, prometheus.GaugeValue, float64(status.Threads), id)
 
 		// Context switches
-		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.GaugeValue, float64(status.CtxSwitches.Voluntary), id, "voluntary")
-		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.GaugeValue, float64(status.CtxSwitches.Involuntary), id, "involuntary")
+		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.CounterValue, float64(status.CtxSwitches.Voluntary), id, "voluntary")
+		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.CounterValue, float64(status.CtxSwitches.Involuntary), id, "involuntary")
 	}
 
 	// IO counters
 	if io, err := c.proc.GetIOCounters(proc.PID); err == nil {
-		for _, m := range []struct {
-			name string
-			val  uint64
-		}{
-			{"kvm_io_read_count", io.ReadSyscalls},
-			{"kvm_io_read_bytes", io.ReadBytes},
-			{"kvm_io_read_chars", io.ReadChars},
-			{"kvm_io_write_count", io.WriteSyscalls},
-			{"kvm_io_write_bytes", io.WriteBytes},
-			{"kvm_io_write_chars", io.WriteChars},
-		} {
-			ch <- prometheus.MustNewConstMetric(
-				prometheus.NewDesc(c.prefix+"_"+m.name, "", []string{"id"}, nil),
-				prometheus.GaugeValue, float64(m.val), id,
-			)
-		}
+		ch <- prometheus.MustNewConstMetric(c.descIOReadCount, prometheus.CounterValue, float64(io.ReadSyscalls), id)
+		ch <- prometheus.MustNewConstMetric(c.descIOReadBytes, prometheus.CounterValue, float64(io.ReadBytes), id)
+		ch <- prometheus.MustNewConstMetric(c.descIOReadChars, prometheus.CounterValue, float64(io.ReadChars), id)
+		ch <- prometheus.MustNewConstMetric(c.descIOWriteCount, prometheus.CounterValue, float64(io.WriteSyscalls), id)
+		ch <- prometheus.MustNewConstMetric(c.descIOWriteBytes, prometheus.CounterValue, float64(io.WriteBytes), id)
+		ch <- prometheus.MustNewConstMetric(c.descIOWriteChars, prometheus.CounterValue, float64(io.WriteChars), id)
 	}
 
 	// VM info metric
@@ -295,8 +313,8 @@ func (c *PVECollector) collectNICMetrics(ch chan<- prometheus.Metric, proc procf
 		}
 		for statName, val := range stats {
 			ch <- prometheus.MustNewConstMetric(
-				prometheus.NewDesc(c.prefix+"_kvm_nic_"+statName, "", []string{"id", "ifname"}, nil),
-				prometheus.GaugeValue, float64(val), id, nic.Ifname,
+				prometheus.NewDesc(c.prefix+"_kvm_nic_"+statName+"_total", fmt.Sprintf("NIC statistic %s", statName), []string{"id", "ifname"}, nil),
+				prometheus.CounterValue, float64(val), id, nic.Ifname,
 			)
 		}
 	}
