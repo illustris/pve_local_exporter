@@ -8,7 +8,7 @@ buildGoModule rec {
 	pname = "pve-local-exporter";
 	version = "0.1.0";
 	src = ./src;
-	vendorHash = "sha256-f0f8tYmoI6DtuB/K4++gu9b2na/d0ECTaF2zvDijW58=";
+	vendorHash = "sha256-MLB7y7shnOhxW8K2R6+d9E63wGEhlErnv+1MYOJO3Hw=";
 	ldflags = [
 		"-X=main.version=${version}"
 	];

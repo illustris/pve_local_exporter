@@ -2,16 +2,21 @@ package qmmonitor
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"pve_local_exporter/internal/cache"
 )
+
+var errTimeout = errors.New("timeout waiting for qm monitor")
 
 // QMMonitor runs commands against qm monitor and caches results.
 type QMMonitor interface {
@@ -19,14 +24,14 @@ type QMMonitor interface {
 	InvalidateCache(vmid, cmd string)
 }
 
-// RealQMMonitor spawns `qm monitor` via os/exec with pipe-based I/O.
+// RealQMMonitor spawns `qm monitor` on a PTY via creack/pty.
 type RealQMMonitor struct {
 	timeout    time.Duration
 	deferClose bool
 	cache      *cache.TTLCache[string, string]
 
-	mu             sync.Mutex
-	deferredProcs  []deferredProc
+	mu            sync.Mutex
+	deferredProcs []deferredProc
 }
 
 type deferredProc struct {
@@ -53,6 +58,7 @@ func (m *RealQMMonitor) InvalidateCache(vmid, cmd string) {
 func (m *RealQMMonitor) RunCommand(vmid, cmd string) (string, error) {
 	key := cacheKey(vmid, cmd)
 	if v, ok := m.cache.Get(key); ok {
+		slog.Debug("qm cache hit", "vmid", vmid, "cmd", cmd)
 		return v, nil
 	}
 
@@ -66,50 +72,56 @@ func (m *RealQMMonitor) RunCommand(vmid, cmd string) (string, error) {
 }
 
 func (m *RealQMMonitor) execQMMonitor(vmid, cmd string) (string, error) {
+	slog.Debug("qm monitor exec", "vmid", vmid, "cmd", cmd)
+	start := time.Now()
+
 	qmCmd := exec.Command("qm", "monitor", vmid)
+	qmCmd.Env = append(os.Environ(), "TERM=dumb")
 
-	stdin, err := qmCmd.StdinPipe()
+	ptmx, err := pty.Start(qmCmd)
 	if err != nil {
-		return "", fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := qmCmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	if err := qmCmd.Start(); err != nil {
 		return "", fmt.Errorf("start qm monitor: %w", err)
 	}
 
-	reader := bufio.NewReader(stdout)
+	reader := bufio.NewReader(ptmx)
 
 	// Wait for initial "qm>" prompt
-	if err := readUntilPrompt(reader, m.timeout); err != nil {
-		m.deferCloseProcess(qmCmd, stdin)
+	deadline := time.Now().Add(m.timeout)
+	_, err = readUntilMarker(reader, "qm>", deadline)
+	if err != nil {
+		slog.Debug("qm monitor initial prompt failed", "vmid", vmid, "err", err)
+		m.killOrDefer(qmCmd, ptmx)
 		return "", fmt.Errorf("initial prompt: %w", err)
 	}
 
 	// Send command
-	fmt.Fprintf(stdin, "%s\n", cmd)
+	fmt.Fprintf(ptmx, "%s\n", cmd)
 
 	// Read response until next "qm>" prompt
-	response, err := readResponseUntilPrompt(reader, m.timeout)
+	deadline = time.Now().Add(m.timeout)
+	raw, err := readUntilMarker(reader, "qm>", deadline)
 	if err != nil {
-		m.deferCloseProcess(qmCmd, stdin)
+		slog.Debug("qm monitor response failed", "vmid", vmid, "cmd", cmd, "err", err)
+		m.killOrDefer(qmCmd, ptmx)
 		return "", fmt.Errorf("read response: %w", err)
 	}
 
-	// Close cleanly
-	stdin.Close()
+	response := parseQMResponse(raw)
+
+	// Close cleanly: closing ptmx sends SIGHUP to child
+	ptmx.Close()
 	if err := qmCmd.Wait(); err != nil {
 		slog.Debug("qm monitor wait error", "vmid", vmid, "err", err)
 	}
 
+	slog.Debug("qm monitor done", "vmid", vmid, "cmd", cmd,
+		"duration", time.Since(start), "responseLen", len(response))
+
 	return response, nil
 }
 
-func (m *RealQMMonitor) deferCloseProcess(cmd *exec.Cmd, stdin io.WriteCloser) {
-	stdin.Close()
+func (m *RealQMMonitor) killOrDefer(cmd *exec.Cmd, closer io.Closer) {
+	closer.Close()
 	if m.deferClose {
 		m.mu.Lock()
 		m.deferredProcs = append(m.deferredProcs, deferredProc{cmd: cmd, timestamp: time.Now()})
@@ -140,50 +152,63 @@ func (m *RealQMMonitor) cleanupDeferred() {
 	m.deferredProcs = still
 }
 
-func readUntilPrompt(r *bufio.Reader, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for qm> prompt")
-		}
-		line, err := r.ReadString('\n')
-		if err != nil {
-			// Check if we got the prompt without newline
-			if strings.Contains(line, "qm>") {
-				return nil
+// readUntilMarker reads from r byte-by-byte until the buffer ends with marker
+// or the deadline expires. Returns everything read before the marker.
+// Uses a goroutine for reads so the deadline is enforced even when ReadByte blocks.
+func readUntilMarker(r *bufio.Reader, marker string, deadline time.Time) (string, error) {
+	type result struct {
+		data string
+		err  error
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		var buf []byte
+		markerBytes := []byte(marker)
+		for {
+			b, err := r.ReadByte()
+			if err != nil {
+				ch <- result{"", err}
+				return
 			}
-			return err
+			buf = append(buf, b)
+			if len(buf) >= len(markerBytes) &&
+				string(buf[len(buf)-len(markerBytes):]) == marker {
+				// Return everything before the marker
+				ch <- result{string(buf[:len(buf)-len(markerBytes)]), nil}
+				return
+			}
 		}
-		if strings.Contains(line, "qm>") {
-			return nil
-		}
+	}()
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		remaining = time.Millisecond
+	}
+	select {
+	case res := <-ch:
+		return res.data, res.err
+	case <-time.After(remaining):
+		return "", errTimeout
 	}
 }
 
-func readResponseUntilPrompt(r *bufio.Reader, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
-	var lines []string
-	firstLine := true
-	for {
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeout waiting for qm> prompt")
-		}
-		line, err := r.ReadString('\n')
-		if err != nil {
-			if strings.Contains(line, "qm>") {
-				break
-			}
-			return "", err
-		}
-		if strings.Contains(line, "qm>") {
-			break
-		}
-		// Skip the echo of the command (first line)
-		if firstLine {
-			firstLine = false
-			continue
-		}
-		lines = append(lines, strings.TrimRight(line, "\r\n"))
+// parseQMResponse takes the raw output before the "qm>" marker from a command
+// response, skips the command echo (first line), and trims \r characters.
+func parseQMResponse(raw string) string {
+	lines := strings.Split(raw, "\n")
+	// Skip the command echo (first line)
+	if len(lines) > 0 {
+		lines = lines[1:]
 	}
-	return strings.Join(lines, "\n"), nil
+	var out []string
+	for _, line := range lines {
+		cleaned := strings.TrimRight(line, "\r")
+		out = append(out, cleaned)
+	}
+	// Trim trailing empty lines
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
 }

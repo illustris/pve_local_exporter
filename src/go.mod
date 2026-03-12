@@ -3,6 +3,7 @@ module pve_local_exporter
 go 1.25.7
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/prometheus/client_golang v1.22.0
 	github.com/prometheus/client_model v0.6.1
 )
