@@ -48,7 +48,14 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 		blockID := match[2]
 		diskPath := match[3]
 		diskTypeAndMode := match[4]
-		diskType := strings.Split(diskTypeAndMode, ", ")[0]
+		modeParts := strings.Split(diskTypeAndMode, ", ")
+		diskType := modeParts[0]
+		readOnly := false
+		for _, p := range modeParts[1:] {
+			if p == "read-only" {
+				readOnly = true
+			}
+		}
 
 		// Skip EFI disks
 		if strings.Contains(diskName, "efidisk") {
@@ -70,6 +77,10 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 			DiskPath: diskPath,
 			DiskType: diskType,
 			Labels:   make(map[string]string),
+		}
+
+		if readOnly {
+			info.Labels["read_only"] = "true"
 		}
 
 		// Detect disk type from path

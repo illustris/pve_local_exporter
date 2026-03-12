@@ -147,59 +147,107 @@ cancelled_write_bytes: 0
 	}
 }
 
-func TestParseThreads(t *testing.T) {
+func TestParseStatus(t *testing.T) {
 	data := `Name:	qemu-system-x86
 Threads:	50
-VmPeak:	1234 kB
-`
-	n, err := ParseThreads(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 50 {
-		t.Errorf("got %d, want 50", n)
-	}
-}
-
-func TestParseMemoryExtended(t *testing.T) {
-	data := `Name:	qemu-system-x86
 VmPeak:	1000 kB
 VmRSS:	500 kB
 VmData:	200 kB
 RssAnon:	100 kB
 HugetlbPages:	0 kB
-`
-	m := ParseMemoryExtended(data)
-	if m["vmpeak:"] != 1000*1024 {
-		t.Errorf("VmPeak = %d", m["vmpeak:"])
-	}
-	if m["vmrss:"] != 500*1024 {
-		t.Errorf("VmRSS = %d", m["vmrss:"])
-	}
-	if m["vmdata:"] != 200*1024 {
-		t.Errorf("VmData = %d", m["vmdata:"])
-	}
-	if m["rssanon:"] != 100*1024 {
-		t.Errorf("RssAnon = %d", m["rssanon:"])
-	}
-	if m["hugetlbpages:"] != 0 {
-		t.Errorf("HugetlbPages = %d", m["hugetlbpages:"])
-	}
-}
-
-func TestParseCtxSwitches(t *testing.T) {
-	data := `Name:	qemu
 voluntary_ctxt_switches:	1234
 nonvoluntary_ctxt_switches:	56
 `
-	cs, err := ParseCtxSwitches(data)
+	info, err := ParseStatus(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cs.Voluntary != 1234 {
-		t.Errorf("Voluntary = %d", cs.Voluntary)
+
+	// Threads
+	if info.Threads != 50 {
+		t.Errorf("Threads = %d, want 50", info.Threads)
 	}
-	if cs.Involuntary != 56 {
-		t.Errorf("Involuntary = %d", cs.Involuntary)
+
+	// VmRSS
+	if info.VmRSS != 500*1024 {
+		t.Errorf("VmRSS = %d, want %d", info.VmRSS, 500*1024)
+	}
+
+	// Memory extended
+	if info.MemoryExtended["vmpeak"] != 1000*1024 {
+		t.Errorf("VmPeak = %d", info.MemoryExtended["vmpeak"])
+	}
+	if info.MemoryExtended["vmrss"] != 500*1024 {
+		t.Errorf("VmRSS = %d", info.MemoryExtended["vmrss"])
+	}
+	if info.MemoryExtended["vmdata"] != 200*1024 {
+		t.Errorf("VmData = %d", info.MemoryExtended["vmdata"])
+	}
+	if info.MemoryExtended["rssanon"] != 100*1024 {
+		t.Errorf("RssAnon = %d", info.MemoryExtended["rssanon"])
+	}
+	if info.MemoryExtended["hugetlbpages"] != 0 {
+		t.Errorf("HugetlbPages = %d", info.MemoryExtended["hugetlbpages"])
+	}
+
+	// Context switches
+	if info.CtxSwitches.Voluntary != 1234 {
+		t.Errorf("Voluntary = %d", info.CtxSwitches.Voluntary)
+	}
+	if info.CtxSwitches.Involuntary != 56 {
+		t.Errorf("Involuntary = %d", info.CtxSwitches.Involuntary)
+	}
+}
+
+func TestParseStatus_NoThreads(t *testing.T) {
+	data := `Name:	qemu
+VmRSS:	100 kB
+`
+	_, err := ParseStatus(data)
+	if err == nil {
+		t.Fatal("expected error for missing Threads")
+	}
+}
+
+func TestParseStat_Malformed(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"no_closing_paren", "12345 (qemu S 1 12345"},
+		{"truncated", "12345 (qemu) S 1 2 3"},
+		{"empty", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseStat(tc.data)
+			if err == nil {
+				t.Fatal("expected error for malformed stat")
+			}
+		})
+	}
+}
+
+func TestParseIO_Empty(t *testing.T) {
+	io, err := ParseIO("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if io.ReadChars != 0 || io.WriteChars != 0 {
+		t.Errorf("expected zero counters, got %+v", io)
+	}
+}
+
+func TestParseIO_MalformedLines(t *testing.T) {
+	data := "rchar: notanumber\nbadline\nwchar: 100\n"
+	io, err := ParseIO(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if io.ReadChars != 0 {
+		t.Errorf("ReadChars = %d, want 0 (parse failure)", io.ReadChars)
+	}
+	if io.WriteChars != 100 {
+		t.Errorf("WriteChars = %d, want 100", io.WriteChars)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,20 @@ type PVECollector struct {
 	storageCache *cache.MtimeCache[[]pveconfig.StorageEntry]
 
 	prefix string
+
+	// Pre-allocated metric descriptors for fixed-label metrics.
+	descCPU          *prometheus.Desc
+	descVcores       *prometheus.Desc
+	descMaxmem       *prometheus.Desc
+	descMemPct       *prometheus.Desc
+	descMemExt       *prometheus.Desc
+	descThreads      *prometheus.Desc
+	descCtxSwitches  *prometheus.Desc
+	descNicInfo      *prometheus.Desc
+	descNicQueues    *prometheus.Desc
+	descDiskSize     *prometheus.Desc
+	descStorageSize  *prometheus.Desc
+	descStorageFree  *prometheus.Desc
 }
 
 type poolData struct {
@@ -93,6 +108,7 @@ func New(cfg config.Config) *PVECollector {
 func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 	qm qmmonitor.QMMonitor, statFS storage.StatFS, cmd CommandRunner, fr FileReaderIface) *PVECollector {
 
+	p := cfg.MetricsPrefix
 	c := &PVECollector{
 		cfg:        cfg,
 		proc:       proc,
@@ -101,7 +117,20 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 		statFS:     statFS,
 		cmdRunner:  cmd,
 		fileReader: fr,
-		prefix:     cfg.MetricsPrefix,
+		prefix:     p,
+
+		descCPU:         prometheus.NewDesc(p+"_kvm_cpu", "KVM CPU time", []string{"id", "mode"}, nil),
+		descVcores:      prometheus.NewDesc(p+"_kvm_vcores", "vCores allocated", []string{"id"}, nil),
+		descMaxmem:      prometheus.NewDesc(p+"_kvm_maxmem", "Maximum memory bytes", []string{"id"}, nil),
+		descMemPct:      prometheus.NewDesc(p+"_kvm_memory_percent", "Memory percent of host", []string{"id"}, nil),
+		descMemExt:      prometheus.NewDesc(p+"_kvm_memory_extended", "Extended memory info", []string{"id", "type"}, nil),
+		descThreads:     prometheus.NewDesc(p+"_kvm_threads", "Threads used", []string{"id"}, nil),
+		descCtxSwitches: prometheus.NewDesc(p+"_kvm_ctx_switches", "Context switches", []string{"id", "type"}, nil),
+		descNicInfo:     prometheus.NewDesc(p+"_kvm_nic", "NIC info", []string{"id", "ifname", "netdev", "queues", "type", "model", "macaddr"}, nil),
+		descNicQueues:   prometheus.NewDesc(p+"_kvm_nic_queues", "NIC queue count", []string{"id", "ifname"}, nil),
+		descDiskSize:    prometheus.NewDesc(p+"_kvm_disk_size", "Disk size bytes", []string{"id", "disk_name"}, nil),
+		descStorageSize: prometheus.NewDesc(p+"_node_storage_size", "Storage total size", []string{"name", "type"}, nil),
+		descStorageFree: prometheus.NewDesc(p+"_node_storage_free", "Storage free space", []string{"name", "type"}, nil),
 	}
 	c.poolCache = cache.NewMtimeCache[poolData]("/etc/pve/user.cfg", fileMtime)
 	c.storageCache = cache.NewMtimeCache[[]pveconfig.StorageEntry]("/etc/pve/storage.cfg", fileMtime)
@@ -110,7 +139,7 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 
 func (c *PVECollector) Describe(ch chan<- *prometheus.Desc) {
 	// Dynamic metrics - use empty desc to signal unchecked collector
-	ch <- prometheus.NewDesc(c.prefix+"_kvm_cpu", "KVM CPU time", nil, nil)
+	ch <- c.descCPU
 }
 
 func (c *PVECollector) Collect(ch chan<- prometheus.Metric) {
@@ -137,11 +166,6 @@ func (c *PVECollector) collectVMs(ch chan<- prometheus.Metric) {
 	}
 
 	// Parallel NIC + disk collection with bounded worker pool
-	type workItem struct {
-		proc procfs.QEMUProcess
-		fn   func()
-	}
-
 	sem := make(chan struct{}, maxWorkers)
 	var wg sync.WaitGroup
 
@@ -179,47 +203,34 @@ func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs
 			{"system", cpu.System},
 			{"iowait", cpu.IOWait},
 		} {
-			ch <- prometheus.MustNewConstMetric(
-				prometheus.NewDesc(c.prefix+"_kvm_cpu", "KVM CPU time", []string{"id", "mode"}, nil),
-				prometheus.GaugeValue, m.val, id, m.mode,
-			)
+			ch <- prometheus.MustNewConstMetric(c.descCPU, prometheus.GaugeValue, m.val, id, m.mode)
 		}
 	}
 
 	// Vcores
-	ch <- prometheus.MustNewConstMetric(
-		prometheus.NewDesc(c.prefix+"_kvm_vcores", "vCores allocated", []string{"id"}, nil),
-		prometheus.GaugeValue, float64(proc.Vcores), id,
-	)
+	ch <- prometheus.MustNewConstMetric(c.descVcores, prometheus.GaugeValue, float64(proc.Vcores), id)
 
 	// MaxMem (kB to bytes)
-	ch <- prometheus.MustNewConstMetric(
-		prometheus.NewDesc(c.prefix+"_kvm_maxmem", "Maximum memory bytes", []string{"id"}, nil),
-		prometheus.GaugeValue, float64(proc.MaxMem*1024), id,
-	)
+	ch <- prometheus.MustNewConstMetric(c.descMaxmem, prometheus.GaugeValue, float64(proc.MaxMem*1024), id)
 
-	// Memory percent
-	if memPct, err := c.proc.GetMemoryPercent(proc.PID); err == nil {
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_kvm_memory_percent", "Memory percent of host", []string{"id"}, nil),
-			prometheus.GaugeValue, memPct, id,
-		)
-	}
-
-	// Memory extended
-	if memExt, err := c.proc.GetMemoryExtended(proc.PID); err == nil {
-		desc := prometheus.NewDesc(c.prefix+"_kvm_memory_extended", "Extended memory info", []string{"id", "type"}, nil)
-		for key, val := range memExt {
-			ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, float64(val), id, key)
+	// Status (threads, memory, context switches) -- single /proc/{pid}/status read
+	if status, err := c.proc.GetStatus(proc.PID); err == nil {
+		// Memory percent
+		if memPct, err := c.proc.GetMemoryPercent(proc.PID, status.VmRSS); err == nil {
+			ch <- prometheus.MustNewConstMetric(c.descMemPct, prometheus.GaugeValue, memPct, id)
 		}
-	}
 
-	// Threads
-	if threads, err := c.proc.GetNumThreads(proc.PID); err == nil {
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_kvm_threads", "Threads used", []string{"id"}, nil),
-			prometheus.GaugeValue, float64(threads), id,
-		)
+		// Memory extended
+		for key, val := range status.MemoryExtended {
+			ch <- prometheus.MustNewConstMetric(c.descMemExt, prometheus.GaugeValue, float64(val), id, key)
+		}
+
+		// Threads
+		ch <- prometheus.MustNewConstMetric(c.descThreads, prometheus.GaugeValue, float64(status.Threads), id)
+
+		// Context switches
+		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.GaugeValue, float64(status.CtxSwitches.Voluntary), id, "voluntary")
+		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.GaugeValue, float64(status.CtxSwitches.Involuntary), id, "involuntary")
 	}
 
 	// IO counters
@@ -240,13 +251,6 @@ func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs
 				prometheus.GaugeValue, float64(m.val), id,
 			)
 		}
-	}
-
-	// Context switches
-	if cs, err := c.proc.GetCtxSwitches(proc.PID); err == nil {
-		desc := prometheus.NewDesc(c.prefix+"_kvm_ctx_switches", "Context switches", []string{"id", "type"}, nil)
-		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, float64(cs.Voluntary), id, "voluntary")
-		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, float64(cs.Involuntary), id, "involuntary")
 	}
 
 	// VM info metric
@@ -275,20 +279,13 @@ func (c *PVECollector) collectNICMetrics(ch chan<- prometheus.Metric, proc procf
 	nics := qmmonitor.ParseNetworkInfo(raw)
 	for _, nic := range nics {
 		// NIC info metric
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_kvm_nic", "NIC info", []string{
-				"id", "ifname", "netdev", "queues", "type", "model", "macaddr",
-			}, nil),
-			prometheus.GaugeValue, 1,
+		ch <- prometheus.MustNewConstMetric(c.descNicInfo, prometheus.GaugeValue, 1,
 			id, nic.Ifname, nic.Netdev, strconv.Itoa(nic.Queues),
 			nic.Type, nic.Model, nic.Macaddr,
 		)
 
 		// NIC queues
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_kvm_nic_queues", "NIC queue count", []string{"id", "ifname"}, nil),
-			prometheus.GaugeValue, float64(nic.Queues), id, nic.Ifname,
-		)
+		ch <- prometheus.MustNewConstMetric(c.descNicQueues, prometheus.GaugeValue, float64(nic.Queues), id, nic.Ifname)
 
 		// NIC stats from sysfs
 		stats, err := c.sys.ReadInterfaceStats(nic.Ifname)
@@ -345,10 +342,7 @@ func (c *PVECollector) collectDiskMetrics(ch chan<- prometheus.Metric, proc proc
 		}
 
 		if diskSize > 0 {
-			ch <- prometheus.MustNewConstMetric(
-				prometheus.NewDesc(c.prefix+"_kvm_disk_size", "Disk size bytes", []string{"id", "disk_name"}, nil),
-				prometheus.GaugeValue, float64(diskSize), id, diskName,
-			)
+			ch <- prometheus.MustNewConstMetric(c.descDiskSize, prometheus.GaugeValue, float64(diskSize), id, diskName)
 		}
 
 		// Disk info metric - collect all labels
@@ -420,14 +414,8 @@ func (c *PVECollector) collectStorage(ch chan<- prometheus.Metric) {
 			continue
 		}
 
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_node_storage_size", "Storage total size", []string{"name", "type"}, nil),
-			prometheus.GaugeValue, float64(size.Total), storageName, storageType,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_node_storage_free", "Storage free space", []string{"name", "type"}, nil),
-			prometheus.GaugeValue, float64(size.Free), storageName, storageType,
-		)
+		ch <- prometheus.MustNewConstMetric(c.descStorageSize, prometheus.GaugeValue, float64(size.Total), storageName, storageType)
+		ch <- prometheus.MustNewConstMetric(c.descStorageFree, prometheus.GaugeValue, float64(size.Free), storageName, storageType)
 	}
 }
 
@@ -439,7 +427,7 @@ func (c *PVECollector) getPoolInfo() (map[string]string, map[string]pveconfig.Po
 	content, err := c.fileReader.ReadFile("/etc/pve/user.cfg")
 	if err != nil {
 		slog.Error("read user.cfg", "err", err)
-		return nil, nil
+		return make(map[string]string), make(map[string]pveconfig.PoolInfo)
 	}
 
 	vmPoolMap, pools := pveconfig.ParsePoolConfig(content)
@@ -468,12 +456,7 @@ func sortedKeys(m map[string]string) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	// Simple insertion sort for typically small maps
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
+	slices.Sort(keys)
 	return keys
 }
 

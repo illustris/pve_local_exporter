@@ -31,7 +31,6 @@ type RealQMMonitor struct {
 
 type deferredProc struct {
 	cmd       *exec.Cmd
-	stdin     io.WriteCloser
 	timestamp time.Time
 }
 
@@ -113,7 +112,7 @@ func (m *RealQMMonitor) deferCloseProcess(cmd *exec.Cmd, stdin io.WriteCloser) {
 	stdin.Close()
 	if m.deferClose {
 		m.mu.Lock()
-		m.deferredProcs = append(m.deferredProcs, deferredProc{cmd: cmd, stdin: stdin, timestamp: time.Now()})
+		m.deferredProcs = append(m.deferredProcs, deferredProc{cmd: cmd, timestamp: time.Now()})
 		m.mu.Unlock()
 		slog.Warn("deferred closing qm monitor process", "pid", cmd.Process.Pid)
 	} else {

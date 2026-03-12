@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,4 +37,21 @@ func TestMtimeCache_HitAndMiss(t *testing.T) {
 	if !ok || v != "world" {
 		t.Fatalf("expected hit with 'world', got %q ok=%v", v, ok)
 	}
+}
+
+func TestMtimeCache_Concurrent(t *testing.T) {
+	mtime := time.Now()
+	stat := func(path string) (time.Time, error) { return mtime, nil }
+	c := NewMtimeCache[int]("/test", stat)
+
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Set(n)
+			c.Get()
+		}(i)
+	}
+	wg.Wait()
 }

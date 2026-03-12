@@ -63,3 +63,27 @@ func TestParseNetworkInfo_Empty(t *testing.T) {
 		t.Fatalf("expected 0 NICs, got %d", len(nics))
 	}
 }
+
+func TestParseNetworkInfo_MalformedLine(t *testing.T) {
+	// Lines without colon-space or without "net" prefix should be skipped
+	raw := "this is garbage\nnotnet0: index=0,type=tap\nno-colon-here\n"
+	nics := ParseNetworkInfo(raw)
+	if len(nics) != 0 {
+		t.Fatalf("expected 0 NICs for malformed input, got %d", len(nics))
+	}
+}
+
+func TestParseNetworkInfo_MissingFields(t *testing.T) {
+	// NIC with minimal fields
+	raw := "net0: index=0"
+	nics := ParseNetworkInfo(raw)
+	if len(nics) != 1 {
+		t.Fatalf("expected 1 NIC, got %d", len(nics))
+	}
+	if nics[0].Queues != 1 {
+		t.Errorf("queues = %d, want 1", nics[0].Queues)
+	}
+	if nics[0].Model != "" {
+		t.Errorf("model = %q, want empty", nics[0].Model)
+	}
+}

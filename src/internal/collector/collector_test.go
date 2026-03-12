@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,17 +16,16 @@ import (
 // Mock implementations
 
 type mockProcReader struct {
-	procs     []procfs.QEMUProcess
-	cpuTimes  map[int]procfs.CPUTimes
-	ioCount   map[int]procfs.IOCounters
-	threads   map[int]int
-	memPct    map[int]float64
-	memExt    map[int]procfs.MemoryExtended
-	ctxSwitch map[int]procfs.CtxSwitches
+	procs    []procfs.QEMUProcess
+	procsErr error
+	cpuTimes map[int]procfs.CPUTimes
+	ioCount  map[int]procfs.IOCounters
+	status   map[int]procfs.StatusInfo
+	memPct   map[int]float64
 }
 
 func (m *mockProcReader) DiscoverQEMUProcesses() ([]procfs.QEMUProcess, error) {
-	return m.procs, nil
+	return m.procs, m.procsErr
 }
 func (m *mockProcReader) GetCPUTimes(pid int) (procfs.CPUTimes, error) {
 	return m.cpuTimes[pid], nil
@@ -33,17 +33,11 @@ func (m *mockProcReader) GetCPUTimes(pid int) (procfs.CPUTimes, error) {
 func (m *mockProcReader) GetIOCounters(pid int) (procfs.IOCounters, error) {
 	return m.ioCount[pid], nil
 }
-func (m *mockProcReader) GetNumThreads(pid int) (int, error) {
-	return m.threads[pid], nil
+func (m *mockProcReader) GetStatus(pid int) (procfs.StatusInfo, error) {
+	return m.status[pid], nil
 }
-func (m *mockProcReader) GetMemoryPercent(pid int) (float64, error) {
+func (m *mockProcReader) GetMemoryPercent(pid int, rssBytes int64) (float64, error) {
 	return m.memPct[pid], nil
-}
-func (m *mockProcReader) GetMemoryExtended(pid int) (procfs.MemoryExtended, error) {
-	return m.memExt[pid], nil
-}
-func (m *mockProcReader) GetCtxSwitches(pid int) (procfs.CtxSwitches, error) {
-	return m.ctxSwitch[pid], nil
 }
 func (m *mockProcReader) VMConfigExists(vmid string) bool { return true }
 
@@ -160,14 +154,15 @@ func TestCollector_BasicVMMetrics(t *testing.T) {
 		ioCount: map[int]procfs.IOCounters{
 			1234: {ReadChars: 1000, WriteChars: 2000, ReadSyscalls: 10, WriteSyscalls: 20, ReadBytes: 500, WriteBytes: 1000},
 		},
-		threads: map[int]int{1234: 50},
-		memPct:  map[int]float64{1234: 25.5},
-		memExt: map[int]procfs.MemoryExtended{
-			1234: {"vmrss:": 1048576, "vmpeak:": 2097152},
+		status: map[int]procfs.StatusInfo{
+			1234: {
+				Threads:        50,
+				VmRSS:          1048576,
+				MemoryExtended: procfs.MemoryExtended{"vmrss": 1048576, "vmpeak": 2097152},
+				CtxSwitches:    procfs.CtxSwitches{Voluntary: 100, Involuntary: 10},
+			},
 		},
-		ctxSwitch: map[int]procfs.CtxSwitches{
-			1234: {Voluntary: 100, Involuntary: 10},
-		},
+		memPct: map[int]float64{1234: 25.5},
 	}
 
 	sys := &mockSysReader{
@@ -302,12 +297,12 @@ func TestCollector_NICMetrics(t *testing.T) {
 		procs: []procfs.QEMUProcess{
 			{PID: 1, VMID: "100", Name: "vm", Vcores: 1, MaxMem: 1024},
 		},
-		cpuTimes:  map[int]procfs.CPUTimes{1: {}},
-		ioCount:   map[int]procfs.IOCounters{1: {}},
-		threads:   map[int]int{1: 1},
-		memPct:    map[int]float64{1: 0},
-		memExt:    map[int]procfs.MemoryExtended{1: {}},
-		ctxSwitch: map[int]procfs.CtxSwitches{1: {}},
+		cpuTimes: map[int]procfs.CPUTimes{1: {}},
+		ioCount:  map[int]procfs.IOCounters{1: {}},
+		status: map[int]procfs.StatusInfo{
+			1: {Threads: 1, MemoryExtended: procfs.MemoryExtended{}},
+		},
+		memPct: map[int]float64{1: 0},
 	}
 
 	sys := &mockSysReader{
@@ -339,5 +334,83 @@ func TestCollector_NICMetrics(t *testing.T) {
 	txBytes := metrics["pve_kvm_nic_tx_bytes"]
 	if len(txBytes) != 1 || txBytes[0].Gauge.GetValue() != 2000 {
 		t.Errorf("tx_bytes = %v", txBytes)
+	}
+}
+
+// mockFileReaderErr returns an error for a specific path.
+type mockFileReaderErr struct {
+	files   map[string]string
+	errPath string
+}
+
+func (m *mockFileReaderErr) ReadFile(path string) (string, error) {
+	if path == m.errPath {
+		return "", fmt.Errorf("read error: %s", path)
+	}
+	return m.files[path], nil
+}
+
+func TestCollector_PoolReadError(t *testing.T) {
+	cfg := config.Config{
+		CollectRunningVMs: true,
+		CollectStorage:    false,
+		MetricsPrefix:     "pve",
+	}
+
+	proc := &mockProcReader{
+		procs: []procfs.QEMUProcess{
+			{PID: 1, VMID: "100", Name: "vm", Vcores: 1, MaxMem: 1024},
+		},
+		cpuTimes: map[int]procfs.CPUTimes{1: {}},
+		ioCount:  map[int]procfs.IOCounters{1: {}},
+		status: map[int]procfs.StatusInfo{
+			1: {Threads: 1, MemoryExtended: procfs.MemoryExtended{}},
+		},
+		memPct: map[int]float64{1: 0},
+	}
+
+	fr := &mockFileReaderErr{
+		files:   map[string]string{},
+		errPath: "/etc/pve/user.cfg",
+	}
+
+	c := NewWithDeps(cfg, proc, &mockSysReader{}, &mockQMMonitor{responses: map[string]string{
+		"100:info network": "",
+		"100:info block":   "",
+	}}, &mockStatFS{}, &mockCmdRunner{}, fr)
+
+	metrics := collectMetrics(c)
+
+	// Should still produce VM info with empty pool
+	infoMetrics := metrics["pve_kvm"]
+	if len(infoMetrics) != 1 {
+		t.Fatalf("expected 1 kvm info metric, got %d", len(infoMetrics))
+	}
+	m := findMetricWithLabels(infoMetrics, map[string]string{"pool": ""})
+	if m == nil {
+		t.Error("expected empty pool label when user.cfg unreadable")
+	}
+}
+
+func TestCollector_ProcessDiscoveryError(t *testing.T) {
+	cfg := config.Config{
+		CollectRunningVMs: true,
+		CollectStorage:    false,
+		MetricsPrefix:     "pve",
+	}
+
+	proc := &mockProcReader{
+		procsErr: fmt.Errorf("permission denied"),
+	}
+
+	fr := &mockFileReader{files: map[string]string{"/etc/pve/user.cfg": ""}}
+	c := NewWithDeps(cfg, proc, &mockSysReader{}, &mockQMMonitor{responses: map[string]string{}},
+		&mockStatFS{}, &mockCmdRunner{}, fr)
+
+	metrics := collectMetrics(c)
+
+	// No VM metrics should be emitted
+	if len(metrics) != 0 {
+		t.Errorf("expected 0 metrics on discovery error, got %d metric names", len(metrics))
 	}
 }

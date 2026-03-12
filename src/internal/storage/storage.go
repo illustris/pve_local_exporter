@@ -18,11 +18,6 @@ type StatFS interface {
 	Statfs(path string) (StorageSize, error)
 }
 
-// CommandRunner abstracts command execution for testability.
-type CommandRunner interface {
-	Run(name string, args ...string) (string, error)
-}
-
 // RealStatFS uses the real syscall.
 type RealStatFS struct{}
 

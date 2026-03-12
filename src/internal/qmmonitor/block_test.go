@@ -130,6 +130,51 @@ func TestHandleJSONPath_NoHostDevice(t *testing.T) {
 	}
 }
 
+func TestParseBlockInfo_ReadOnly(t *testing.T) {
+	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-only)
+`
+	disks := ParseBlockInfo(raw)
+	d := disks["scsi0"]
+	if d.Labels["read_only"] != "true" {
+		t.Errorf("expected read_only=true, got %q", d.Labels["read_only"])
+	}
+}
+
+func TestParseBlockInfo_ReadWrite(t *testing.T) {
+	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
+`
+	disks := ParseBlockInfo(raw)
+	d := disks["scsi0"]
+	if _, ok := d.Labels["read_only"]; ok {
+		t.Error("read_only label should not be set for read-write disks")
+	}
+}
+
+func TestParseBlockInfo_MalformedHeader(t *testing.T) {
+	raw := `drive-scsi0: this is not a valid header
+`
+	disks := ParseBlockInfo(raw)
+	if len(disks) != 0 {
+		t.Fatalf("expected 0 disks for malformed header, got %d", len(disks))
+	}
+}
+
+func TestParseBlockInfo_Empty(t *testing.T) {
+	disks := ParseBlockInfo("")
+	if len(disks) != 0 {
+		t.Fatalf("expected 0 disks for empty input, got %d", len(disks))
+	}
+}
+
+func TestParseBlockInfo_JSONError(t *testing.T) {
+	raw := `drive-scsi0 (#block100): json:{invalid json} (raw, read-write)
+`
+	disks := ParseBlockInfo(raw)
+	if len(disks) != 0 {
+		t.Fatalf("expected 0 disks for invalid JSON path, got %d", len(disks))
+	}
+}
+
 func TestParseBlockInfo_MultiDisk(t *testing.T) {
 	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
     Attached to:      /machine/peripheral/virtioscsi0/virtio-backend

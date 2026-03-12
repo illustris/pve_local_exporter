@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -40,6 +41,24 @@ func TestTTLCache_Invalidate(t *testing.T) {
 	if ok {
 		t.Fatal("expected invalidated entry")
 	}
+}
+
+func TestTTLCache_Concurrent(t *testing.T) {
+	c := NewTTLCache[string, int](time.Hour, 0)
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			key := "key"
+			c.Set(key, n)
+			c.Get(key)
+			c.Invalidate(key)
+			c.Set(key, n+1)
+			c.Get(key)
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestTTLCache_JitterRange(t *testing.T) {

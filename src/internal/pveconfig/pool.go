@@ -2,8 +2,6 @@ package pveconfig
 
 import (
 	"strings"
-
-	"pve_local_exporter/internal/cache"
 )
 
 // PoolInfo holds parsed pool hierarchy info.
@@ -12,12 +10,6 @@ type PoolInfo struct {
 	Level1     string
 	Level2     string
 	Level3     string
-}
-
-// FileReader abstracts file reading for testability.
-type FileReader interface {
-	ReadFile(path string) (string, error)
-	Stat(path string) (cache.StatFunc, error)
 }
 
 // ParsePoolConfig parses /etc/pve/user.cfg for pool definitions.

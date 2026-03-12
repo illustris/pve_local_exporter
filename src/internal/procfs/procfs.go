@@ -46,15 +46,21 @@ type CtxSwitches struct {
 // MemoryExtended holds memory info from /proc/{pid}/status (values in bytes).
 type MemoryExtended map[string]int64
 
+// StatusInfo holds all fields parsed from /proc/{pid}/status in a single read.
+type StatusInfo struct {
+	Threads        int
+	VmRSS          int64 // bytes
+	MemoryExtended MemoryExtended
+	CtxSwitches    CtxSwitches
+}
+
 // ProcReader abstracts /proc access for testability.
 type ProcReader interface {
 	DiscoverQEMUProcesses() ([]QEMUProcess, error)
 	GetCPUTimes(pid int) (CPUTimes, error)
 	GetIOCounters(pid int) (IOCounters, error)
-	GetNumThreads(pid int) (int, error)
-	GetMemoryPercent(pid int) (float64, error)
-	GetMemoryExtended(pid int) (MemoryExtended, error)
-	GetCtxSwitches(pid int) (CtxSwitches, error)
+	GetStatus(pid int) (StatusInfo, error)
+	GetMemoryPercent(pid int, rssBytes int64) (float64, error)
 	VMConfigExists(vmid string) bool
 }
 
@@ -143,32 +149,15 @@ func (r *RealProcReader) GetIOCounters(pid int) (IOCounters, error) {
 	return ParseIO(string(data))
 }
 
-func (r *RealProcReader) GetNumThreads(pid int) (int, error) {
+func (r *RealProcReader) GetStatus(pid int) (StatusInfo, error) {
 	data, err := os.ReadFile(filepath.Join(r.ProcPath, strconv.Itoa(pid), "status"))
 	if err != nil {
-		return 0, err
+		return StatusInfo{}, err
 	}
-	return ParseThreads(string(data))
+	return ParseStatus(string(data))
 }
 
-func (r *RealProcReader) GetMemoryPercent(pid int) (float64, error) {
-	// Read process RSS and total memory to compute percentage
-	statusData, err := os.ReadFile(filepath.Join(r.ProcPath, strconv.Itoa(pid), "status"))
-	if err != nil {
-		return 0, err
-	}
-	rss := int64(0)
-	for _, line := range strings.Split(string(statusData), "\n") {
-		if strings.HasPrefix(line, "VmRSS:") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				rss, _ = strconv.ParseInt(parts[1], 10, 64)
-				rss *= 1024 // kB to bytes
-			}
-			break
-		}
-	}
-
+func (r *RealProcReader) GetMemoryPercent(pid int, rssBytes int64) (float64, error) {
 	meminfoData, err := os.ReadFile(filepath.Join(r.ProcPath, "meminfo"))
 	if err != nil {
 		return 0, err
@@ -187,23 +176,7 @@ func (r *RealProcReader) GetMemoryPercent(pid int) (float64, error) {
 	if totalMem == 0 {
 		return 0, nil
 	}
-	return float64(rss) / float64(totalMem) * 100.0, nil
-}
-
-func (r *RealProcReader) GetMemoryExtended(pid int) (MemoryExtended, error) {
-	data, err := os.ReadFile(filepath.Join(r.ProcPath, strconv.Itoa(pid), "status"))
-	if err != nil {
-		return nil, err
-	}
-	return ParseMemoryExtended(string(data)), nil
-}
-
-func (r *RealProcReader) GetCtxSwitches(pid int) (CtxSwitches, error) {
-	data, err := os.ReadFile(filepath.Join(r.ProcPath, strconv.Itoa(pid), "status"))
-	if err != nil {
-		return CtxSwitches{}, err
-	}
-	return ParseCtxSwitches(string(data))
+	return float64(rssBytes) / float64(totalMem) * 100.0, nil
 }
 
 // ParseCmdline splits a null-byte separated /proc/{pid}/cmdline.
@@ -339,56 +312,49 @@ func ParseIO(data string) (IOCounters, error) {
 	return io, nil
 }
 
-// ParseThreads extracts the Threads count from /proc/{pid}/status.
-func ParseThreads(data string) (int, error) {
-	for _, line := range strings.Split(data, "\n") {
-		if strings.HasPrefix(line, "Threads:") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				return strconv.Atoi(parts[1])
-			}
-		}
-	}
-	return 0, fmt.Errorf("Threads field not found")
-}
+// ParseStatus parses /proc/{pid}/status in one pass, extracting threads, VmRSS,
+// memory extended fields, and context switches.
+func ParseStatus(data string) (StatusInfo, error) {
+	var info StatusInfo
+	info.MemoryExtended = make(MemoryExtended)
+	foundThreads := false
 
-// ParseMemoryExtended parses /proc/{pid}/status for Vm*/Rss*/Hugetlb* lines.
-// Returns map with lowercase keys (trailing colon preserved) to values in bytes.
-func ParseMemoryExtended(data string) MemoryExtended {
-	m := make(MemoryExtended)
-	for _, line := range strings.Split(data, "\n") {
-		if strings.HasPrefix(line, "Vm") || strings.HasPrefix(line, "Rss") || strings.HasPrefix(line, "Hugetlb") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				key := strings.ToLower(parts[0]) // keeps trailing colon
-				val, err := strconv.ParseInt(parts[1], 10, 64)
-				if err != nil {
-					continue
-				}
-				if len(parts) >= 3 && parts[2] == "kB" {
-					val *= 1024
-				}
-				m[key] = val
-			}
-		}
-	}
-	return m
-}
-
-// ParseCtxSwitches parses voluntary/involuntary context switches from /proc/{pid}/status.
-func ParseCtxSwitches(data string) (CtxSwitches, error) {
-	var cs CtxSwitches
 	for _, line := range strings.Split(data, "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
 		}
-		switch parts[0] {
-		case "voluntary_ctxt_switches:":
-			cs.Voluntary, _ = strconv.ParseUint(parts[1], 10, 64)
-		case "nonvoluntary_ctxt_switches:":
-			cs.Involuntary, _ = strconv.ParseUint(parts[1], 10, 64)
+
+		switch {
+		case parts[0] == "Threads:":
+			n, err := strconv.Atoi(parts[1])
+			if err != nil {
+				return StatusInfo{}, fmt.Errorf("parse Threads: %w", err)
+			}
+			info.Threads = n
+			foundThreads = true
+		case parts[0] == "voluntary_ctxt_switches:":
+			info.CtxSwitches.Voluntary, _ = strconv.ParseUint(parts[1], 10, 64)
+		case parts[0] == "nonvoluntary_ctxt_switches:":
+			info.CtxSwitches.Involuntary, _ = strconv.ParseUint(parts[1], 10, 64)
+		case strings.HasPrefix(line, "Vm") || strings.HasPrefix(line, "Rss") || strings.HasPrefix(line, "Hugetlb"):
+			key := strings.ToLower(strings.TrimSuffix(parts[0], ":"))
+			val, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				continue
+			}
+			if len(parts) >= 3 && parts[2] == "kB" {
+				val *= 1024
+			}
+			info.MemoryExtended[key] = val
+			if key == "vmrss" {
+				info.VmRSS = val
+			}
 		}
 	}
-	return cs, nil
+
+	if !foundThreads {
+		return StatusInfo{}, fmt.Errorf("Threads field not found")
+	}
+	return info, nil
 }
