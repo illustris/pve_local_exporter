@@ -14,6 +14,7 @@ import (
 
 	"github.com/creack/pty"
 	"pve_local_exporter/internal/cache"
+	"pve_local_exporter/internal/logging"
 )
 
 var errTimeout = errors.New("timeout waiting for qm monitor")
@@ -75,6 +76,7 @@ func (m *RealQMMonitor) execQMMonitor(vmid, cmd string) (string, error) {
 	slog.Debug("qm monitor exec", "vmid", vmid, "cmd", cmd)
 	start := time.Now()
 
+	logging.Trace("qm pty spawn start", "vmid", vmid)
 	qmCmd := exec.Command("qm", "monitor", vmid)
 	qmCmd.Env = append(os.Environ(), "TERM=dumb")
 
@@ -82,6 +84,7 @@ func (m *RealQMMonitor) execQMMonitor(vmid, cmd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("start qm monitor: %w", err)
 	}
+	logging.Trace("qm pty spawn success", "vmid", vmid, "pid", qmCmd.Process.Pid)
 
 	reader := bufio.NewReader(ptmx)
 
@@ -93,8 +96,10 @@ func (m *RealQMMonitor) execQMMonitor(vmid, cmd string) (string, error) {
 		m.killOrDefer(qmCmd, ptmx)
 		return "", fmt.Errorf("initial prompt: %w", err)
 	}
+	logging.Trace("qm initial prompt received", "vmid", vmid)
 
 	// Send command
+	logging.Trace("qm send command", "vmid", vmid, "cmd", cmd)
 	fmt.Fprintf(ptmx, "%s\n", cmd)
 
 	// Read response until next "qm>" prompt
@@ -105,6 +110,7 @@ func (m *RealQMMonitor) execQMMonitor(vmid, cmd string) (string, error) {
 		m.killOrDefer(qmCmd, ptmx)
 		return "", fmt.Errorf("read response: %w", err)
 	}
+	logging.Trace("qm raw response", "vmid", vmid, "raw_len", len(raw))
 
 	response := parseQMResponse(raw)
 

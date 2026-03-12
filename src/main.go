@@ -15,6 +15,7 @@ import (
 
 	"pve_local_exporter/internal/collector"
 	"pve_local_exporter/internal/config"
+	"pve_local_exporter/internal/logging"
 )
 
 var version string
@@ -30,6 +31,8 @@ func main() {
 
 	level := slog.LevelInfo
 	switch strings.ToUpper(cfg.LogLevel) {
+	case "TRACE":
+		level = logging.LevelTrace
 	case "DEBUG":
 		level = slog.LevelDebug
 	case "WARNING", "WARN":
@@ -37,7 +40,18 @@ func main() {
 	case "ERROR", "CRITICAL":
 		level = slog.LevelError
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				lvl := a.Value.Any().(slog.Level)
+				if lvl == logging.LevelTrace {
+					a.Value = slog.StringValue("TRACE")
+				}
+			}
+			return a
+		},
+	})))
 
 	reg := prometheus.NewRegistry()
 	c := collector.New(cfg)
@@ -60,7 +74,7 @@ func main() {
 		server.Close()
 	}()
 
-	log.Printf("listening on %s", addr)
+	slog.Info("listening", "addr", addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

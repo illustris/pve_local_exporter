@@ -3,6 +3,8 @@ package qmmonitor
 import (
 	"strconv"
 	"strings"
+
+	"pve_local_exporter/internal/logging"
 )
 
 // NICInfo holds parsed network interface info from "info network".
@@ -64,14 +66,17 @@ func ParseNetworkInfo(raw string) []NICInfo {
 	var result []NICInfo
 	for netdev, cfg := range nicsMap {
 		idx, _ := strconv.Atoi(cfg["index"])
-		result = append(result, NICInfo{
+		nic := NICInfo{
 			Netdev:  netdev,
 			Queues:  idx + 1,
 			Type:    cfg["type"],
 			Model:   cfg["model"],
 			Macaddr: cfg["macaddr"],
 			Ifname:  cfg["ifname"],
-		})
+		}
+		logging.Trace("parsed NIC", "netdev", netdev, "ifname", nic.Ifname, "queues", nic.Queues, "model", nic.Model)
+		result = append(result, nic)
 	}
+	logging.Trace("ParseNetworkInfo complete", "nic_count", len(result))
 	return result
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"pve_local_exporter/internal/logging"
 )
 
 // SysReader abstracts /sys access for testability.
@@ -46,6 +48,7 @@ func (r *RealSysReader) ReadInterfaceStats(ifname string) (map[string]int64, err
 		}
 		stats[e.Name()] = val
 	}
+	logging.Trace("interface stats", "ifname", ifname, "stat_count", len(stats))
 	return stats, nil
 }
 
@@ -58,6 +61,7 @@ func (r *RealSysReader) GetBlockDeviceSize(devPath string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve symlink %s: %w", devPath, err)
 	}
+	logging.Trace("block device resolved", "path", devPath, "resolved", resolved)
 
 	// Extract device name from /dev/XXX
 	devName := filepath.Base(resolved)
@@ -84,5 +88,6 @@ func GetDeviceSymlinkTarget(devPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	logging.Trace("device symlink resolved", "path", devPath, "target", resolved)
 	return resolved, nil
 }

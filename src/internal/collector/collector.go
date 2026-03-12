@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"pve_local_exporter/internal/cache"
 	"pve_local_exporter/internal/config"
+	"pve_local_exporter/internal/logging"
 	"pve_local_exporter/internal/procfs"
 	"pve_local_exporter/internal/pveconfig"
 	"pve_local_exporter/internal/qmmonitor"
@@ -191,9 +193,11 @@ func (c *PVECollector) collectVMs(ch chan<- prometheus.Metric) {
 		slog.Error("discover QEMU processes", "err", err)
 		return
 	}
+	logging.Trace("collectVMs", "vm_count", len(procs))
 
 	// Load pool info
 	vmPoolMap, pools := c.getPoolInfo()
+	logging.Trace("pool info loaded", "vm_pool_map_size", len(vmPoolMap), "pools_count", len(pools))
 
 	for _, proc := range procs {
 		c.collectVMMetrics(ch, proc, vmPoolMap, pools)
@@ -299,8 +303,10 @@ func (c *PVECollector) collectNICMetrics(ch chan<- prometheus.Metric, proc procf
 		slog.Error("qm info network", "vmid", id, "err", err)
 		return
 	}
+	logging.Trace("qm info network response", "vmid", id, "raw_len", len(raw))
 
 	nics := qmmonitor.ParseNetworkInfo(raw)
+	logging.Trace("parsed NICs", "vmid", id, "nic_count", len(nics))
 	for _, nic := range nics {
 		// NIC info metric
 		ch <- prometheus.MustNewConstMetric(c.descNicInfo, prometheus.GaugeValue, 1,
@@ -334,14 +340,16 @@ func (c *PVECollector) collectDiskMetrics(ch chan<- prometheus.Metric, proc proc
 		slog.Error("qm info block", "vmid", id, "err", err)
 		return
 	}
+	logging.Trace("qm info block response", "vmid", id, "raw_len", len(raw))
 
 	disks := qmmonitor.ParseBlockInfo(raw)
+	logging.Trace("parsed disks", "vmid", id, "disk_count", len(disks))
 	for diskName, disk := range disks {
 		// Try to get device symlink target for zvol/rbd/lvm
 		if disk.DiskType == "zvol" || disk.DiskType == "rbd" || disk.DiskType == "lvm" {
 			target, err := sysfs.GetDeviceSymlinkTarget(disk.DiskPath)
 			if err == nil {
-				disk.Labels["device"] = target
+				disk.Labels["device"] = filepath.Base(target)
 			} else {
 				slog.Debug("resolve device symlink", "path", disk.DiskPath, "err", err)
 				// Retry with cache invalidation
@@ -364,6 +372,9 @@ func (c *PVECollector) collectDiskMetrics(ch chan<- prometheus.Metric, proc proc
 				diskSize = size
 			}
 		}
+
+		logging.Trace("disk metric", "vmid", id, "disk", diskName, "type", disk.DiskType,
+			"path", disk.DiskPath, "size", diskSize, "device", disk.Labels["device"])
 
 		if diskSize > 0 {
 			ch <- prometheus.MustNewConstMetric(c.descDiskSize, prometheus.GaugeValue, float64(diskSize), id, diskName)
@@ -392,6 +403,7 @@ func (c *PVECollector) collectDiskMetrics(ch chan<- prometheus.Metric, proc proc
 
 func (c *PVECollector) collectStorage(ch chan<- prometheus.Metric) {
 	entries := c.getStorageEntries()
+	logging.Trace("collectStorage", "entries_count", len(entries))
 
 	// Compute superset of property keys across all entries
 	keySet := make(map[string]struct{})
@@ -410,6 +422,7 @@ func (c *PVECollector) collectStorage(ch chan<- prometheus.Metric) {
 	for _, entry := range entries {
 		storageType := entry.Properties["type"]
 		storageName := entry.Properties["name"]
+		logging.Trace("storage entry", "name", storageName, "type", storageType)
 
 		// Info metric with consistent labels
 		vals := make([]string, len(allKeys))
@@ -438,7 +451,7 @@ func (c *PVECollector) collectStorage(ch chan<- prometheus.Metric) {
 			poolName := strings.Split(pool, "/")[0]
 			out, runErr := c.cmdRunner.Run("zpool", "list", "-p", poolName)
 			if runErr != nil {
-				slog.Error("zpool list", "pool", poolName, "err", runErr)
+				slog.Warn("zpool list", "pool", poolName, "err", runErr)
 				continue
 			}
 			size, err = storage.GetZPoolSize(out)

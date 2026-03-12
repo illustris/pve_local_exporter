@@ -218,6 +218,39 @@ func TestParseBlockInfo_DetectZeroesUnmap(t *testing.T) {
 	}
 }
 
+func TestParseBlockInfo_AttachedToVirtio(t *testing.T) {
+	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
+    Attached to:      /machine/peripheral/virtio0/virtio-backend
+`
+	disks := ParseBlockInfo(raw)
+	d := disks["scsi0"]
+	if d.Labels["attached_to"] != "virtio0" {
+		t.Errorf("attached_to = %q, want %q", d.Labels["attached_to"], "virtio0")
+	}
+}
+
+func TestParseBlockInfo_AttachedToVirtioScsi(t *testing.T) {
+	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
+    Attached to:      /machine/peripheral/virtioscsi0/virtio-backend
+`
+	disks := ParseBlockInfo(raw)
+	d := disks["scsi0"]
+	if d.Labels["attached_to"] != "virtioscsi0" {
+		t.Errorf("attached_to = %q, want %q", d.Labels["attached_to"], "virtioscsi0")
+	}
+}
+
+func TestParseBlockInfo_AttachedToBare(t *testing.T) {
+	raw := `drive-ide2 (#block100): /path/to/disk.iso (raw, read-only)
+    Attached to:      ide2
+`
+	disks := ParseBlockInfo(raw)
+	d := disks["ide2"]
+	if d.Labels["attached_to"] != "ide2" {
+		t.Errorf("attached_to = %q, want %q", d.Labels["attached_to"], "ide2")
+	}
+}
+
 func TestParseBlockInfo_MultiDisk(t *testing.T) {
 	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
     Attached to:      /machine/peripheral/virtioscsi0/virtio-backend

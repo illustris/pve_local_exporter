@@ -2,10 +2,13 @@ package procfs
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"pve_local_exporter/internal/logging"
 )
 
 const clkTck = 100 // sysconf(_SC_CLK_TCK) on Linux
@@ -83,6 +86,7 @@ func (r *RealProcReader) DiscoverQEMUProcesses() ([]QEMUProcess, error) {
 		return nil, err
 	}
 
+	numericPIDs := 0
 	var procs []QEMUProcess
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -92,26 +96,32 @@ func (r *RealProcReader) DiscoverQEMUProcesses() ([]QEMUProcess, error) {
 		if err != nil {
 			continue
 		}
+		numericPIDs++
 
 		exe, err := os.Readlink(filepath.Join(r.ProcPath, e.Name(), "exe"))
 		if err != nil {
+			logging.Trace("proc readlink failed", "pid", pid, "err", err)
 			continue
 		}
 		if exe != "/usr/bin/qemu-system-x86_64" {
+			logging.Trace("proc exe skip", "pid", pid, "exe", exe)
 			continue
 		}
 
 		cmdlineBytes, err := os.ReadFile(filepath.Join(r.ProcPath, e.Name(), "cmdline"))
 		if err != nil {
+			logging.Trace("proc cmdline read failed", "pid", pid, "err", err)
 			continue
 		}
 		cmdline := ParseCmdline(cmdlineBytes)
 
 		vmid := FlagValue(cmdline, "-id")
 		if vmid == "" {
+			logging.Trace("proc no -id flag", "pid", pid)
 			continue
 		}
 		if !r.VMConfigExists(vmid) {
+			logging.Trace("proc no config", "pid", pid, "vmid", vmid)
 			continue
 		}
 
@@ -123,7 +133,13 @@ func (r *RealProcReader) DiscoverQEMUProcesses() ([]QEMUProcess, error) {
 		}
 		proc.Vcores = ParseVcores(cmdline)
 		proc.MaxMem = ParseMem(cmdline)
+		logging.Trace("proc discovered VM", "pid", pid, "vmid", vmid, "name", proc.Name)
 		procs = append(procs, proc)
+	}
+
+	logging.Trace("proc scan complete", "numeric_pids", numericPIDs, "qemu_count", len(procs))
+	if len(procs) == 0 {
+		slog.Warn("no QEMU processes discovered", "numeric_pids", numericPIDs, "proc_path", r.ProcPath, "pve_cfg_path", r.PVECfgPath)
 	}
 	return procs, nil
 }

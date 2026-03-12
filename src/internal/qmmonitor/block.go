@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+
+	"pve_local_exporter/internal/logging"
 )
 
 // DiskInfo holds parsed block device info from "info block".
@@ -44,6 +46,7 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 
 		match := blockHeaderRe.FindStringSubmatch(strings.TrimSpace(lines[0]))
 		if match == nil {
+			logging.Trace("block header no match", "line", lines[0])
 			continue
 		}
 
@@ -69,8 +72,10 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 		if strings.HasPrefix(diskPath, "json:") {
 			resolved, err := HandleJSONPath(diskPath)
 			if err != nil {
+				logging.Trace("block json path error", "disk", diskName, "err", err)
 				continue
 			}
+			logging.Trace("block json resolved", "disk", diskName, "resolved", resolved)
 			diskPath = resolved
 		}
 
@@ -88,6 +93,7 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 
 		// Detect disk type from path
 		classifyDisk(&info)
+		logging.Trace("block classified", "disk", diskName, "type", info.DiskType, "path", diskPath)
 
 		// Parse additional info from remaining lines
 		for _, line := range lines[1:] {
@@ -95,6 +101,13 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 			if strings.HasPrefix(line, "Attached to:") {
 				// Extract device ID, e.g. "Attached to:      /machine/peripheral/virtio0/virtio-backend"
 				val := strings.TrimSpace(strings.TrimPrefix(line, "Attached to:"))
+				// Extract short device name from QOM path
+				if strings.Contains(val, "/") {
+					qomParts := strings.Split(val, "/")
+					if len(qomParts) > 3 {
+						val = qomParts[3]
+					}
+				}
 				info.Labels["attached_to"] = val
 			} else if strings.HasPrefix(line, "Cache mode:") {
 				val := strings.TrimSpace(strings.TrimPrefix(line, "Cache mode:"))
@@ -105,9 +118,11 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 			}
 		}
 
+		logging.Trace("block parsed", "disk", diskName, "labels", info.Labels)
 		result[diskName] = info
 	}
 
+	logging.Trace("ParseBlockInfo complete", "disk_count", len(result))
 	if len(result) == 0 && raw != "" {
 		slog.Debug("ParseBlockInfo found no disks", "rawLen", len(raw))
 	}

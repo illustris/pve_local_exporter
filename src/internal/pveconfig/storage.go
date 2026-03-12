@@ -3,6 +3,8 @@ package pveconfig
 import (
 	"regexp"
 	"strings"
+
+	"pve_local_exporter/internal/logging"
 )
 
 // StorageEntry holds a parsed storage definition from storage.cfg.
@@ -47,6 +49,7 @@ func ParseStorageConfig(data string) []StorageEntry {
 					"name": SanitizeKey(sectionName),
 				},
 			}
+			logging.Trace("storage.cfg section", "type", sectionType, "name", sectionName)
 			continue
 		}
 
@@ -66,5 +69,6 @@ func ParseStorageConfig(data string) []StorageEntry {
 		result = append(result, *current)
 	}
 
+	logging.Trace("ParseStorageConfig complete", "entries", len(result))
 	return result
 }

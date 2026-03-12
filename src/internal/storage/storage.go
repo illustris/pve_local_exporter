@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"pve_local_exporter/internal/logging"
 )
 
 // StorageSize holds the total and free bytes of a storage pool.
@@ -51,6 +53,8 @@ func GetZPoolSize(output string) (StorageSize, error) {
 		return StorageSize{}, fmt.Errorf("not enough fields in zpool output: %q", lines[1])
 	}
 
+	logging.Trace("zpool fields", "name", fields[0], "size", fields[1], "alloc", fields[2], "free", fields[3])
+
 	total, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil {
 		return StorageSize{}, fmt.Errorf("parse total: %w", err)
@@ -60,5 +64,6 @@ func GetZPoolSize(output string) (StorageSize, error) {
 		return StorageSize{}, fmt.Errorf("parse free: %w", err)
 	}
 
+	logging.Trace("zpool parsed", "total", total, "free", free)
 	return StorageSize{Total: total, Free: free}, nil
 }
