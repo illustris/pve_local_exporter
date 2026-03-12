@@ -49,6 +49,7 @@ type PVECollector struct {
 	descCtxSwitches  *prometheus.Desc
 	descNicInfo      *prometheus.Desc
 	descNicQueues    *prometheus.Desc
+	descDiskInfo     *prometheus.Desc
 	descDiskSize     *prometheus.Desc
 	descStorageSize  *prometheus.Desc
 	descStorageFree  *prometheus.Desc
@@ -141,7 +142,12 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 		descCtxSwitches: prometheus.NewDesc(p+"_kvm_ctx_switches_total", "Context switches", []string{"id", "type"}, nil),
 		descNicInfo:     prometheus.NewDesc(p+"_kvm_nic_info", "NIC info", []string{"id", "ifname", "netdev", "queues", "type", "model", "macaddr"}, nil),
 		descNicQueues:   prometheus.NewDesc(p+"_kvm_nic_queues", "NIC queue count", []string{"id", "ifname"}, nil),
-		descDiskSize:    prometheus.NewDesc(p+"_kvm_disk_size_bytes", "Disk size bytes", []string{"id", "disk_name"}, nil),
+		descDiskInfo: prometheus.NewDesc(p+"_kvm_disk_info", "Disk info", []string{
+			"id", "disk_name", "block_id", "disk_path", "disk_type",
+			"vol_name", "pool", "pool_name", "cluster_id", "vg_name",
+			"device", "attached_to", "cache_mode", "detect_zeroes", "read_only",
+		}, nil),
+		descDiskSize: prometheus.NewDesc(p+"_kvm_disk_size_bytes", "Disk size bytes", []string{"id", "disk_name"}, nil),
 		descStorageSize: prometheus.NewDesc(p+"_node_storage_size_bytes", "Storage total size", []string{"name", "type"}, nil),
 		descStorageFree: prometheus.NewDesc(p+"_node_storage_free_bytes", "Storage free space", []string{"name", "type"}, nil),
 
@@ -363,19 +369,23 @@ func (c *PVECollector) collectDiskMetrics(ch chan<- prometheus.Metric, proc proc
 			ch <- prometheus.MustNewConstMetric(c.descDiskSize, prometheus.GaugeValue, float64(diskSize), id, diskName)
 		}
 
-		// Disk info metric - collect all labels
-		labelNames := []string{"id", "disk_name", "block_id", "disk_path", "disk_type"}
-		labelValues := []string{id, diskName, disk.BlockID, disk.DiskPath, disk.DiskType}
-
-		// Add variable labels in sorted-ish order
-		for _, key := range sortedKeys(disk.Labels) {
-			labelNames = append(labelNames, key)
-			labelValues = append(labelValues, disk.Labels[key])
-		}
-
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_kvm_disk", "Disk info", labelNames, nil),
-			prometheus.GaugeValue, 1, labelValues...,
+		// Disk info metric with fixed label set
+		ch <- prometheus.MustNewConstMetric(c.descDiskInfo, prometheus.GaugeValue, 1,
+			id,
+			diskName,
+			disk.BlockID,
+			disk.DiskPath,
+			disk.DiskType,
+			disk.Labels["vol_name"],
+			disk.Labels["pool"],
+			disk.Labels["pool_name"],
+			disk.Labels["cluster_id"],
+			disk.Labels["vg_name"],
+			disk.Labels["device"],
+			disk.Labels["attached_to"],
+			disk.Labels["cache_mode"],
+			disk.Labels["detect_zeroes"],
+			disk.Labels["read_only"],
 		)
 	}
 }
@@ -383,21 +393,30 @@ func (c *PVECollector) collectDiskMetrics(ch chan<- prometheus.Metric, proc proc
 func (c *PVECollector) collectStorage(ch chan<- prometheus.Metric) {
 	entries := c.getStorageEntries()
 
+	// Compute superset of property keys across all entries
+	keySet := make(map[string]struct{})
+	for _, entry := range entries {
+		for k := range entry.Properties {
+			keySet[k] = struct{}{}
+		}
+	}
+	allKeys := sortedKeySet(keySet)
+
+	// Create descriptor once with fixed labels for this scrape
+	storageInfoDesc := prometheus.NewDesc(
+		c.prefix+"_node_storage_info", "Storage info", allKeys, nil,
+	)
+
 	for _, entry := range entries {
 		storageType := entry.Properties["type"]
 		storageName := entry.Properties["name"]
 
-		// Info metric
-		labelNames := make([]string, 0, len(entry.Properties))
-		labelValues := make([]string, 0, len(entry.Properties))
-		for _, key := range sortedKeys(entry.Properties) {
-			labelNames = append(labelNames, key)
-			labelValues = append(labelValues, entry.Properties[key])
+		// Info metric with consistent labels
+		vals := make([]string, len(allKeys))
+		for i, k := range allKeys {
+			vals[i] = entry.Properties[k] // "" if missing
 		}
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(c.prefix+"_node_storage", "Storage info", labelNames, nil),
-			prometheus.GaugeValue, 1, labelValues...,
-		)
+		ch <- prometheus.MustNewConstMetric(storageInfoDesc, prometheus.GaugeValue, 1, vals...)
 
 		// Size metrics
 		var size storage.StorageSize
@@ -470,6 +489,15 @@ func (c *PVECollector) getStorageEntries() []pveconfig.StorageEntry {
 }
 
 func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func sortedKeySet(m map[string]struct{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

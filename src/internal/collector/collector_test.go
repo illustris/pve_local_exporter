@@ -307,7 +307,7 @@ func TestCollector_StorageMetrics(t *testing.T) {
 	}
 
 	// Check storage info
-	infoMetrics := metrics["pve_node_storage"]
+	infoMetrics := metrics["pve_node_storage_info"]
 	if len(infoMetrics) != 1 {
 		t.Fatalf("expected 1 storage info metric, got %d", len(infoMetrics))
 	}
@@ -474,5 +474,91 @@ func TestCollector_BuildInfo(t *testing.T) {
 	m := findMetricWithLabels(bi, map[string]string{"version": "1.2.3"})
 	if m == nil {
 		t.Error("build_info missing version label")
+	}
+}
+
+func TestCollector_DiskInfoMetrics(t *testing.T) {
+	cfg := config.Config{
+		CollectRunningVMs: true,
+		CollectStorage:    false,
+		MetricsPrefix:     "pve",
+	}
+
+	proc := &mockProcReader{
+		procs: []procfs.QEMUProcess{
+			{PID: 1, VMID: "100", Name: "vm", Vcores: 1, MaxMem: 1024},
+		},
+		cpuTimes: map[int]procfs.CPUTimes{1: {}},
+		ioCount:  map[int]procfs.IOCounters{1: {}},
+		status: map[int]procfs.StatusInfo{
+			1: {Threads: 1, MemoryExtended: procfs.MemoryExtended{}},
+		},
+		memPct: map[int]float64{1: 0},
+	}
+
+	blockOutput := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
+    Attached to:      /machine/peripheral/virtioscsi0/virtio-backend
+    Cache mode:       writeback, direct
+    Detect zeroes:    on
+drive-scsi1 (#block101): /mnt/storage/images/100/vm-100-disk-1.qcow2 (qcow2, read-only)
+    Attached to:      /machine/peripheral/virtioscsi0/virtio-backend
+`
+
+	sys := &mockSysReader{
+		blockSize: map[string]int64{
+			"/dev/zvol/rpool/data/vm-100-disk-0": 10737418240,
+		},
+	}
+
+	qm := &mockQMMonitor{responses: map[string]string{
+		"100:info network": "",
+		"100:info block":   blockOutput,
+	}}
+
+	fr := &mockFileReader{files: map[string]string{"/etc/pve/user.cfg": ""}}
+	c := NewWithDeps(cfg, proc, sys, qm, &mockStatFS{}, &mockCmdRunner{}, fr)
+	metrics := collectMetrics(c)
+
+	diskInfo := metrics["pve_kvm_disk_info"]
+	if len(diskInfo) != 2 {
+		t.Fatalf("expected 2 disk info metrics, got %d", len(diskInfo))
+	}
+
+	// Check zvol disk
+	m := findMetricWithLabels(diskInfo, map[string]string{
+		"id":            "100",
+		"disk_name":     "scsi0",
+		"disk_type":     "zvol",
+		"cache_mode":    "writeback, direct",
+		"detect_zeroes": "on",
+		"read_only":     "",
+		"vol_name":      "vm-100-disk-0",
+		"pool":          "rpool/data",
+	})
+	if m == nil {
+		t.Error("zvol disk info metric not found with expected labels")
+	}
+
+	// Check qcow2 disk (read-only, no cache_mode)
+	m = findMetricWithLabels(diskInfo, map[string]string{
+		"id":         "100",
+		"disk_name":  "scsi1",
+		"disk_type":  "qcow2",
+		"read_only":  "true",
+		"cache_mode": "",
+		"vol_name":   "vm-100-disk-1",
+	})
+	if m == nil {
+		t.Error("qcow2 disk info metric not found with expected labels")
+	}
+
+	// Verify disk size for zvol
+	diskSize := metrics["pve_kvm_disk_size_bytes"]
+	if len(diskSize) < 1 {
+		t.Fatal("expected at least 1 disk size metric")
+	}
+	m = findMetricWithLabels(diskSize, map[string]string{"disk_name": "scsi0"})
+	if m == nil || metricValue(m) != 10737418240 {
+		t.Errorf("disk size for scsi0 = %v", m)
 	}
 }

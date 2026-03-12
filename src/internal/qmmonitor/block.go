@@ -3,6 +3,7 @@ package qmmonitor
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 )
@@ -95,13 +96,7 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 				info.Labels["attached_to"] = val
 			} else if strings.HasPrefix(line, "Cache mode:") {
 				val := strings.TrimSpace(strings.TrimPrefix(line, "Cache mode:"))
-				for _, mode := range strings.Split(val, ", ") {
-					mode = strings.TrimSpace(mode)
-					if mode != "" {
-						key := "cache_mode_" + strings.ReplaceAll(mode, " ", "_")
-						info.Labels[key] = "true"
-					}
-				}
+				info.Labels["cache_mode"] = val
 			} else if strings.HasPrefix(line, "Detect zeroes:") {
 				info.Labels["detect_zeroes"] = "on"
 			}
@@ -110,6 +105,9 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 		result[diskName] = info
 	}
 
+	if len(result) == 0 && raw != "" {
+		slog.Debug("ParseBlockInfo found no disks", "rawLen", len(raw))
+	}
 	return result
 }
 

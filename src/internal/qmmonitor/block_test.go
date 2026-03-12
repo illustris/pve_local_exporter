@@ -27,11 +27,8 @@ func TestParseBlockInfo_Qcow2(t *testing.T) {
 	if d.Labels["detect_zeroes"] != "on" {
 		t.Errorf("detect_zeroes = %q", d.Labels["detect_zeroes"])
 	}
-	if d.Labels["cache_mode_writeback"] != "true" {
-		t.Errorf("cache_mode_writeback missing")
-	}
-	if d.Labels["cache_mode_direct"] != "true" {
-		t.Errorf("cache_mode_direct missing")
+	if d.Labels["cache_mode"] != "writeback, direct" {
+		t.Errorf("cache_mode = %q, want %q", d.Labels["cache_mode"], "writeback, direct")
 	}
 }
 
