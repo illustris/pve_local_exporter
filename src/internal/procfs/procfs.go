@@ -103,7 +103,7 @@ func (r *RealProcReader) DiscoverQEMUProcesses() ([]QEMUProcess, error) {
 			logging.Trace("proc readlink failed", "pid", pid, "err", err)
 			continue
 		}
-		if exe != "/usr/bin/qemu-system-x86_64" {
+		if exe != "/usr/bin/qemu-system-x86_64" && exe != "/usr/bin/qemu-system-x86_64 (deleted)" {
 			logging.Trace("proc exe skip", "pid", pid, "exe", exe)
 			continue
 		}

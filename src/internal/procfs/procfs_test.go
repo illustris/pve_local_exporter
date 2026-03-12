@@ -1,6 +1,8 @@
 package procfs
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -249,5 +251,80 @@ func TestParseIO_MalformedLines(t *testing.T) {
 	}
 	if io.WriteChars != 100 {
 		t.Errorf("WriteChars = %d, want 100", io.WriteChars)
+	}
+}
+
+// TestDiscoverQEMUProcesses_DeletedExe verifies that QEMU processes whose
+// /proc/{pid}/exe has a " (deleted)" suffix (common after package upgrades)
+// are still discovered.
+func TestDiscoverQEMUProcesses_DeletedExe(t *testing.T) {
+	// Build a fake /proc tree with two "QEMU" PIDs:
+	//   1000 -> normal exe
+	//   1001 -> exe with " (deleted)" suffix
+	tmpDir := t.TempDir()
+	procDir := filepath.Join(tmpDir, "proc")
+	pveCfgDir := filepath.Join(tmpDir, "pve")
+
+	cmdline100 := "/usr/bin/qemu-system-x86_64\x00-id\x00100\x00-name\x00vm100\x00-cpu\x00host\x00-smp\x004\x00-m\x002048\x00"
+	cmdline101 := "/usr/bin/qemu-system-x86_64\x00-id\x00101\x00-name\x00vm101\x00-cpu\x00host\x00-smp\x002\x00-m\x001024\x00"
+
+	for _, tc := range []struct {
+		pid, vmid, exe, cmdline string
+	}{
+		{"1000", "100", "/usr/bin/qemu-system-x86_64", cmdline100},
+		{"1001", "101", "/usr/bin/qemu-system-x86_64 (deleted)", cmdline101},
+	} {
+		pidDir := filepath.Join(procDir, tc.pid)
+		if err := os.MkdirAll(pidDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Create a real file as the symlink target, then symlink "exe" -> that file.
+		// os.Readlink returns the target path, which is what DiscoverQEMUProcesses reads.
+		target := filepath.Join(tmpDir, "bin-"+tc.pid)
+		if err := os.WriteFile(target, nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// We can't make Readlink return an arbitrary string with a real symlink,
+		// so instead we write the exe path to a regular file and override the
+		// readlink behavior. But DiscoverQEMUProcesses uses os.Readlink...
+		// The trick: symlink to the exact path string. On Linux, symlink targets
+		// don't need to exist -- Readlink returns the raw target.
+		if err := os.Symlink(tc.exe, filepath.Join(pidDir, "exe")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte(tc.cmdline), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Create VM config so VMConfigExists returns true
+		if err := os.MkdirAll(pveCfgDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pveCfgDir, tc.vmid+".conf"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := &RealProcReader{
+		ProcPath:    procDir,
+		PVECfgPath: pveCfgDir,
+	}
+	procs, err := r.DiscoverQEMUProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(procs) != 2 {
+		t.Fatalf("expected 2 procs, got %d", len(procs))
+	}
+
+	// Collect discovered VMIDs
+	vmids := map[string]bool{}
+	for _, p := range procs {
+		vmids[p.VMID] = true
+	}
+	if !vmids["100"] {
+		t.Error("VM 100 (normal exe) not discovered")
+	}
+	if !vmids["101"] {
+		t.Error("VM 101 (deleted exe) not discovered")
 	}
 }
