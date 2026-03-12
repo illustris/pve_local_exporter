@@ -17,8 +17,10 @@ type DiskInfo struct {
 	Labels   map[string]string // additional labels: vol_name, pool, device, etc.
 }
 
-// blockHeaderRe matches: "disk_name (#blockN): /path/to/disk (type, mode)"
-var blockHeaderRe = regexp.MustCompile(`^(\w+) \(#block(\d+)\): (.+) \(([\w, -]+)\)$`)
+// blockHeaderRe matches block device headers in both old and new QEMU formats:
+//   Old: "disk_name (#blockN): /path/to/disk (type, mode)"
+//   New: "disk_name: /path/to/disk (type, mode)"
+var blockHeaderRe = regexp.MustCompile(`^(\w+)(?:\s+\(#block(\d+)\))?: (.+) \(([\w, -]+)\)$`)
 
 // lvmRe matches: /dev/{vg_name}/vm-{N}-disk-{N}
 var lvmRe = regexp.MustCompile(`^/dev/([^/]+)/(vm-\d+-disk-\d+)$`)
@@ -98,7 +100,8 @@ func ParseBlockInfo(raw string) map[string]DiskInfo {
 				val := strings.TrimSpace(strings.TrimPrefix(line, "Cache mode:"))
 				info.Labels["cache_mode"] = val
 			} else if strings.HasPrefix(line, "Detect zeroes:") {
-				info.Labels["detect_zeroes"] = "on"
+				val := strings.TrimSpace(strings.TrimPrefix(line, "Detect zeroes:"))
+				info.Labels["detect_zeroes"] = val
 			}
 		}
 

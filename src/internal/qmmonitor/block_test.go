@@ -172,6 +172,52 @@ func TestParseBlockInfo_JSONError(t *testing.T) {
 	}
 }
 
+func TestParseBlockInfo_Throttle(t *testing.T) {
+	// PVE 9.x / newer QEMU format: no (#blockN)
+	raw := `drive-scsi0: json:{"driver":"raw","file":{"driver":"host_device","filename":"/dev/zvol/rpool/data/vm-100-disk-0"}} (throttle, read-write)
+    Attached to:      /machine/peripheral/virtioscsi0/virtio-backend
+    Cache mode:       writeback, direct
+    Detect zeroes:    unmap
+`
+	disks := ParseBlockInfo(raw)
+	if len(disks) != 1 {
+		t.Fatalf("expected 1 disk, got %d", len(disks))
+	}
+	d := disks["scsi0"]
+	if d.BlockID != "" {
+		t.Errorf("block_id = %q, want empty", d.BlockID)
+	}
+	if d.DiskType != "zvol" {
+		t.Errorf("type = %q, want zvol", d.DiskType)
+	}
+	if d.DiskPath != "/dev/zvol/rpool/data/vm-100-disk-0" {
+		t.Errorf("path = %q", d.DiskPath)
+	}
+	if d.Labels["pool"] != "rpool/data" {
+		t.Errorf("pool = %q", d.Labels["pool"])
+	}
+	if d.Labels["vol_name"] != "vm-100-disk-0" {
+		t.Errorf("vol_name = %q", d.Labels["vol_name"])
+	}
+	if d.Labels["detect_zeroes"] != "unmap" {
+		t.Errorf("detect_zeroes = %q, want unmap", d.Labels["detect_zeroes"])
+	}
+	if d.Labels["cache_mode"] != "writeback, direct" {
+		t.Errorf("cache_mode = %q", d.Labels["cache_mode"])
+	}
+}
+
+func TestParseBlockInfo_DetectZeroesUnmap(t *testing.T) {
+	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
+    Detect zeroes:    unmap
+`
+	disks := ParseBlockInfo(raw)
+	d := disks["scsi0"]
+	if d.Labels["detect_zeroes"] != "unmap" {
+		t.Errorf("detect_zeroes = %q, want unmap", d.Labels["detect_zeroes"])
+	}
+}
+
 func TestParseBlockInfo_MultiDisk(t *testing.T) {
 	raw := `drive-scsi0 (#block100): /dev/zvol/rpool/data/vm-100-disk-0 (raw, read-write)
     Attached to:      /machine/peripheral/virtioscsi0/virtio-backend
