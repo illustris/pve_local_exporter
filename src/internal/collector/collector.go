@@ -285,7 +285,7 @@ func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs
 	poolName := vmPoolMap[id]
 	poolInfo := pools[poolName]
 	ch <- prometheus.MustNewConstMetric(
-		prometheus.NewDesc(c.prefix+"_kvm", "VM info", []string{
+		prometheus.NewDesc(c.prefix+"_kvm_info", "VM info", []string{
 			"id", "name", "cpu", "pid", "pool", "pool_levels", "pool1", "pool2", "pool3",
 		}, nil),
 		prometheus.GaugeValue, 1,

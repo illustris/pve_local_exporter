@@ -250,7 +250,7 @@ func TestCollector_BasicVMMetrics(t *testing.T) {
 	}
 
 	// Check VM info metric
-	infoMetrics := metrics["pve_kvm"]
+	infoMetrics := metrics["pve_kvm_info"]
 	if len(infoMetrics) != 1 {
 		t.Fatalf("expected 1 kvm info metric, got %d", len(infoMetrics))
 	}
@@ -409,7 +409,7 @@ func TestCollector_PoolReadError(t *testing.T) {
 	metrics := collectMetrics(c)
 
 	// Should still produce VM info with empty pool
-	infoMetrics := metrics["pve_kvm"]
+	infoMetrics := metrics["pve_kvm_info"]
 	if len(infoMetrics) != 1 {
 		t.Fatalf("expected 1 kvm info metric, got %d", len(infoMetrics))
 	}
