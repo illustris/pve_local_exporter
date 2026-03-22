@@ -55,35 +55,42 @@ All metric names are prefixed with the configured `--metrics-prefix` (default `p
 
 ### Per-VM metrics
 
-| Metric | Labels | Description |
-|--------|--------|-------------|
-| `_kvm` | id, name, cpu, pid, pool, pool_levels, pool1-3 | VM info (value 1) |
-| `_kvm_cpu` | id, mode | CPU time (user/system/iowait) |
-| `_kvm_vcores` | id | Allocated vCPU count |
-| `_kvm_maxmem` | id | Maximum memory in bytes |
-| `_kvm_memory_percent` | id | RSS as percent of host memory |
-| `_kvm_memory_extended` | id, type | Detailed memory fields from /proc status |
-| `_kvm_threads` | id | Thread count |
-| `_kvm_ctx_switches` | id, type | Context switches (voluntary/involuntary) |
-| `_kvm_io_read_bytes` | id | I/O read bytes |
-| `_kvm_io_write_bytes` | id | I/O write bytes |
-| `_kvm_io_read_chars` | id | I/O read chars |
-| `_kvm_io_write_chars` | id | I/O write chars |
-| `_kvm_io_read_count` | id | I/O read syscalls |
-| `_kvm_io_write_count` | id | I/O write syscalls |
-| `_kvm_nic` | id, ifname, netdev, queues, type, model, macaddr | NIC info (value 1) |
-| `_kvm_nic_queues` | id, ifname | NIC queue count |
-| `_kvm_nic_*` | id, ifname | Per-NIC sysfs counters (rx_bytes, tx_bytes, etc.) |
-| `_kvm_disk` | id, disk_name, block_id, disk_path, disk_type, ... | Disk info (value 1) |
-| `_kvm_disk_size` | id, disk_name | Disk size in bytes |
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `_kvm_info` | gauge | id, name, cpu, pid, pool, pool_levels, pool1, pool2, pool3 | VM info (value 1) |
+| `_kvm_cpu_seconds_total` | counter | id, mode | KVM CPU time (mode: user, system, iowait) |
+| `_kvm_vcores` | gauge | id | vCores allocated |
+| `_kvm_maxmem_bytes` | gauge | id | Maximum memory in bytes |
+| `_kvm_memory_percent` | gauge | id | Memory percent of host |
+| `_kvm_memory_extended` | gauge | id, type | Extended memory info from /proc status (vmrss, vmpeak, etc.) |
+| `_kvm_threads` | gauge | id | Threads used |
+| `_kvm_ctx_switches_total` | counter | id, type | Context switches (type: voluntary, involuntary) |
+| `_kvm_io_read_count_total` | counter | id | Read system calls by KVM process |
+| `_kvm_io_read_bytes_total` | counter | id | Bytes read from disk by KVM process |
+| `_kvm_io_read_chars_total` | counter | id | Bytes read including buffers by KVM process |
+| `_kvm_io_write_count_total` | counter | id | Write system calls by KVM process |
+| `_kvm_io_write_bytes_total` | counter | id | Bytes written to disk by KVM process |
+| `_kvm_io_write_chars_total` | counter | id | Bytes written including buffers by KVM process |
+| `_kvm_nic_info` | gauge | id, ifname, netdev, queues, type, model, macaddr | NIC info (value 1) |
+| `_kvm_nic_queues` | gauge | id, ifname | NIC queue count |
+| `_kvm_nic_{stat}_total` | counter | id, ifname | Per-NIC sysfs counters (rx_bytes, tx_bytes, rx_packets, etc.) |
+| `_kvm_disk_info` | gauge | id, disk_name, block_id, disk_path, disk_type, vol_name, pool, pool_name, cluster_id, vg_name, device, attached_to, cache_mode, detect_zeroes, read_only | Disk info (value 1) |
+| `_kvm_disk_size_bytes` | gauge | id, disk_name | Disk size in bytes |
 
 ### Storage metrics
 
-| Metric | Labels | Description |
-|--------|--------|-------------|
-| `_node_storage` | name, type, ... | Storage pool info (value 1) |
-| `_node_storage_size` | name, type | Total storage size in bytes |
-| `_node_storage_free` | name, type | Free storage space in bytes |
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `_node_storage_info` | gauge | (dynamic, varies by storage config) | Storage pool info (value 1) |
+| `_node_storage_size_bytes` | gauge | name, type | Storage total size in bytes |
+| `_node_storage_free_bytes` | gauge | name, type | Storage free space in bytes |
+
+### Operational metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `_scrape_duration_seconds` | gauge | | Duration of metrics collection |
+| `_exporter_build_info` | gauge | version | Build information (value 1) |
 
 ## Architecture
 
