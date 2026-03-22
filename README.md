@@ -4,6 +4,8 @@ Prometheus exporter for Proxmox VE that collects VM and storage metrics directly
 
 Metrics are gathered by reading `/proc`, `/sys`, `/etc/pve`, and running `qm monitor` commands.
 
+> **Disclaimer:** This is a heavily vibe-coded rewrite of [pvemon](https://github.com/illustris/pvemon) for better maintainability and easier distribution. This disclaimer will remain up until the codebase has been reviewed and validated.
+
 ## Building
 
 Requires [Nix](https://nixos.org/):
