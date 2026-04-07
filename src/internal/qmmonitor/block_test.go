@@ -268,3 +268,58 @@ drive-scsi1 (#block101): /mnt/storage/images/100/vm-100-disk-1.qcow2 (qcow2, rea
 		t.Errorf("scsi1 type = %q", disks["scsi1"].DiskType)
 	}
 }
+
+func TestParseBlockInfo_ThrottleJSONWithDriveInValue(t *testing.T) {
+	// PVE 9.x format: throttle JSON contains "throttle-drive-*" in values,
+	// which previously caused strings.Split("drive-") to break mid-JSON.
+	raw := `drive-ide2: json:{"throttle-group": "throttle-drive-ide2", "driver": "throttle", "file": {"driver": "raw", "file": {"driver": "host_device", "filename": "/dev/zvol/rpool/data/vm-100-cloudinit"}}} (throttle, read-only)
+    Attached to:      ide2
+    Removable device: locked, tray closed
+    Cache mode:       writeback
+
+drive-virtio0: json:{"throttle-group": "throttle-drive-virtio0", "driver": "throttle", "file": {"driver": "raw", "file": {"driver": "host_device", "filename": "/dev/rbd-pve/00000000-0000-0000-0000-000000000001/pool1/vm-100-disk-0"}}} (throttle)
+    Attached to:      /machine/peripheral/virtio0/virtio-backend
+    Cache mode:       writeback
+    Detect zeroes:    on`
+	disks := ParseBlockInfo(raw)
+	// ide2 is cloudinit (not efidisk), so it should be included
+	if len(disks) != 2 {
+		t.Fatalf("expected 2 disks, got %d", len(disks))
+	}
+	d := disks["virtio0"]
+	if d.DiskType != "rbd" {
+		t.Errorf("type = %q, want rbd", d.DiskType)
+	}
+	if d.DiskPath != "/dev/rbd-pve/00000000-0000-0000-0000-000000000001/pool1/vm-100-disk-0" {
+		t.Errorf("path = %q", d.DiskPath)
+	}
+	if d.Labels["attached_to"] != "virtio0" {
+		t.Errorf("attached_to = %q", d.Labels["attached_to"])
+	}
+	if d.Labels["detect_zeroes"] != "on" {
+		t.Errorf("detect_zeroes = %q", d.Labels["detect_zeroes"])
+	}
+}
+
+func TestParseBlockInfo_OldFormatNoMode(t *testing.T) {
+	// Old PVE format with (#blockN) but no read-write/read-only suffix
+	raw := `drive-virtio0 (#block109): /dev/zvol/data/vm-100-disk-0 (raw)
+    Attached to:      /machine/peripheral/virtio0/virtio-backend
+    Cache mode:       writeback, direct
+    Detect zeroes:    on
+`
+	disks := ParseBlockInfo(raw)
+	if len(disks) != 1 {
+		t.Fatalf("expected 1 disk, got %d", len(disks))
+	}
+	d := disks["virtio0"]
+	if d.BlockID != "109" {
+		t.Errorf("block_id = %q, want 109", d.BlockID)
+	}
+	if d.DiskType != "zvol" {
+		t.Errorf("type = %q, want zvol", d.DiskType)
+	}
+	if d.Labels["cache_mode"] != "writeback, direct" {
+		t.Errorf("cache_mode = %q", d.Labels["cache_mode"])
+	}
+}

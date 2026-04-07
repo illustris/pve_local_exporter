@@ -27,18 +27,33 @@ var blockHeaderRe = regexp.MustCompile(`^(\w+)(?:\s+\(#block(\d+)\))?: (.+) \(([
 // lvmRe matches: /dev/{vg_name}/vm-{N}-disk-{N}
 var lvmRe = regexp.MustCompile(`^/dev/([^/]+)/(vm-\d+-disk-\d+)$`)
 
+// driveStartRe matches "drive-" at the start of a line.
+// This avoids splitting on "drive-" embedded inside JSON values
+// (e.g., "throttle-group": "throttle-drive-virtio0").
+var driveStartRe = regexp.MustCompile(`(?m)^drive-`)
+
 // ParseBlockInfo parses "info block" output from qm monitor.
 // Returns map of disk_name -> DiskInfo. Skips efidisk entries.
 func ParseBlockInfo(raw string) map[string]DiskInfo {
 	result := make(map[string]DiskInfo)
 
-	// Split by "drive-" prefix to get individual disk blocks
-	parts := strings.Split(raw, "drive-")
-	if len(parts) < 2 {
+	// Find all "drive-" at start of a line and extract each block section
+	indices := driveStartRe.FindAllStringIndex(raw, -1)
+	if len(indices) == 0 {
 		return result
 	}
 
-	for _, part := range parts[1:] {
+	parts := make([]string, len(indices))
+	for i, idx := range indices {
+		start := idx[0] + len("drive-")
+		end := len(raw)
+		if i+1 < len(indices) {
+			end = indices[i+1][0]
+		}
+		parts[i] = raw[start:end]
+	}
+
+	for _, part := range parts {
 		lines := strings.Split(strings.TrimSpace(part), "\n")
 		if len(lines) == 0 {
 			continue
