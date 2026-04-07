@@ -128,8 +128,8 @@ func (r *RealProcReader) DiscoverQEMUProcesses() ([]QEMUProcess, error) {
 		proc := QEMUProcess{
 			PID:  pid,
 			VMID: vmid,
-			Name: FlagValue(cmdline, "-name"),
-			CPU:  FlagValue(cmdline, "-cpu"),
+			Name: FlagValueBase(cmdline, "-name"),
+			CPU:  FlagValueBase(cmdline, "-cpu"),
 		}
 		proc.Vcores = ParseVcores(cmdline)
 		proc.MaxMem = ParseMem(cmdline)
@@ -214,6 +214,19 @@ func FlagValue(cmdline []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+// FlagValueBase returns the value after a flag, taking only the part
+// before the first comma. QEMU flags like -name and -cpu use
+// comma-separated sub-options (e.g. "-name myvm,debug-threads=on",
+// "-cpu host,+kvm_pv_eoi") where only the first element is the
+// primary value.
+func FlagValueBase(cmdline []string, flag string) string {
+	v := FlagValue(cmdline, flag)
+	if i := strings.IndexByte(v, ','); i >= 0 {
+		return v[:i]
+	}
+	return v
 }
 
 // ParseVcores extracts vCPU count from -smp flag.

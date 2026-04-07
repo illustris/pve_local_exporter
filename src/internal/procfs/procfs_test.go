@@ -35,6 +35,24 @@ func TestFlagValue(t *testing.T) {
 	}
 }
 
+func TestFlagValueBase(t *testing.T) {
+	cmdline := []string{"-name", "myvm,debug-threads=on", "-cpu", "host,+kvm_pv_eoi,+kvm_pv_unhalt", "-id", "100"}
+	tests := []struct {
+		flag, want string
+	}{
+		{"-name", "myvm"},
+		{"-cpu", "host"},
+		{"-id", "100"},
+		{"-missing", ""},
+	}
+	for _, tc := range tests {
+		got := FlagValueBase(cmdline, tc.flag)
+		if got != tc.want {
+			t.Errorf("FlagValueBase(%q) = %q, want %q", tc.flag, got, tc.want)
+		}
+	}
+}
+
 func TestParseVcores(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -265,7 +283,7 @@ func TestDiscoverQEMUProcesses_DeletedExe(t *testing.T) {
 	procDir := filepath.Join(tmpDir, "proc")
 	pveCfgDir := filepath.Join(tmpDir, "pve")
 
-	cmdline100 := "/usr/bin/qemu-system-x86_64\x00-id\x00100\x00-name\x00vm100\x00-cpu\x00host\x00-smp\x004\x00-m\x002048\x00"
+	cmdline100 := "/usr/bin/qemu-system-x86_64\x00-id\x00100\x00-name\x00vm100,debug-threads=on\x00-cpu\x00host,+kvm_pv_eoi,+kvm_pv_unhalt\x00-smp\x004\x00-m\x002048\x00"
 	cmdline101 := "/usr/bin/qemu-system-x86_64\x00-id\x00101\x00-name\x00vm101\x00-cpu\x00host\x00-smp\x002\x00-m\x001024\x00"
 
 	for _, tc := range []struct {
@@ -326,5 +344,17 @@ func TestDiscoverQEMUProcesses_DeletedExe(t *testing.T) {
 	}
 	if !vmids["101"] {
 		t.Error("VM 101 (deleted exe) not discovered")
+	}
+
+	// Verify comma-separated options are stripped from name and cpu
+	for _, p := range procs {
+		if p.VMID == "100" {
+			if p.Name != "vm100" {
+				t.Errorf("VM 100 name = %q, want %q", p.Name, "vm100")
+			}
+			if p.CPU != "host" {
+				t.Errorf("VM 100 cpu = %q, want %q", p.CPU, "host")
+			}
+		}
 	}
 }
