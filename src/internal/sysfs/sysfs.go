@@ -14,6 +14,20 @@ import (
 type SysReader interface {
 	ReadInterfaceStats(ifname string) (map[string]int64, error)
 	GetBlockDeviceSize(devPath string) (int64, error)
+	ReadCgroupMemory(vmid string) (CgroupMemory, error)
+}
+
+// CgroupMemory holds cgroup v2 memory accounting for a VM scope.
+type CgroupMemory struct {
+	Current int64 // memory.current
+	Swap    int64 // memory.swap.current
+	Anon    int64 // memory.stat anon
+	File    int64 // memory.stat file (host page cache charged to the VM)
+}
+
+// Used returns memory.current minus page cache, matching PVE's "memhost".
+func (m CgroupMemory) Used() int64 {
+	return m.Current - m.File
 }
 
 // RealSysReader reads from the actual /sys filesystem.
@@ -90,4 +104,58 @@ func GetDeviceSymlinkTarget(devPath string) (string, error) {
 	}
 	logging.Trace("device symlink resolved", "path", devPath, "target", resolved)
 	return resolved, nil
+}
+
+// ReadCgroupMemory reads cgroup v2 memory accounting from
+// /sys/fs/cgroup/qemu.slice/{vmid}.scope/.
+func (r *RealSysReader) ReadCgroupMemory(vmid string) (CgroupMemory, error) {
+	dir := filepath.Join(r.SysPath, "fs", "cgroup", "qemu.slice", vmid+".scope")
+
+	var m CgroupMemory
+	current, err := readInt(filepath.Join(dir, "memory.current"))
+	if err != nil {
+		return m, err
+	}
+	m.Current = current
+
+	// memory.swap.current is absent when swap accounting is disabled.
+	if swap, err := readInt(filepath.Join(dir, "memory.swap.current")); err == nil {
+		m.Swap = swap
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "memory.stat"))
+	if err != nil {
+		return m, err
+	}
+	stat := ParseMemoryStat(string(data))
+	m.Anon = stat["anon"]
+	m.File = stat["file"]
+
+	logging.Trace("cgroup memory", "vmid", vmid, "current", m.Current, "file", m.File, "swap", m.Swap)
+	return m, nil
+}
+
+// ParseMemoryStat parses a cgroup v2 memory.stat file ("key value" per line).
+func ParseMemoryStat(data string) map[string]int64 {
+	stat := make(map[string]int64)
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		val, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		stat[fields[0]] = val
+	}
+	return stat
+}
+
+func readInt(path string) (int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 }

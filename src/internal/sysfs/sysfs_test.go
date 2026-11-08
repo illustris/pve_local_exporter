@@ -67,3 +67,38 @@ func TestGetBlockDeviceSize(t *testing.T) {
 		t.Errorf("size = %d, want %d", size, expected)
 	}
 }
+
+func TestParseMemoryStat(t *testing.T) {
+	stat := ParseMemoryStat("anon 1029132288\nfile 1474560\nkernel 7061504\nbogus\nbad x\n")
+	if stat["anon"] != 1029132288 || stat["file"] != 1474560 || stat["kernel"] != 7061504 {
+		t.Errorf("unexpected stat: %v", stat)
+	}
+	if len(stat) != 3 {
+		t.Errorf("expected 3 entries, got %d", len(stat))
+	}
+}
+
+func TestReadCgroupMemory(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "fs", "cgroup", "qemu.slice", "100.scope")
+	os.MkdirAll(dir, 0755)
+	os.WriteFile(filepath.Join(dir, "memory.current"), []byte("1061707776\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "memory.swap.current"), []byte("4096\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "memory.stat"), []byte("anon 1029132288\nfile 1474560\n"), 0644)
+
+	reader := &RealSysReader{SysPath: tmpDir}
+	m, err := reader.ReadCgroupMemory("100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Current != 1061707776 || m.Swap != 4096 || m.Anon != 1029132288 || m.File != 1474560 {
+		t.Errorf("unexpected: %+v", m)
+	}
+	if m.Used() != 1061707776-1474560 {
+		t.Errorf("Used() = %d", m.Used())
+	}
+
+	if _, err := reader.ReadCgroupMemory("999"); err == nil {
+		t.Error("expected error for missing scope")
+	}
+}

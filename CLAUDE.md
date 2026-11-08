@@ -28,8 +28,8 @@ src/
     config/                        CLI flag parsing -> Config struct
     cache/                         TTLCache[K,V] (with jitter), MtimeCache[V] (file change detection)
     procfs/                        /proc parsing: process discovery, CPU, IO, memory, threads, ctx switches
-    sysfs/                         /sys reading: NIC stats, block device sizes
-    qmmonitor/                     qm monitor pipe I/O + TTL cache, network/block output parsers
+    sysfs/                         /sys reading: NIC stats, block device sizes, VM cgroup memory (qemu.slice/<vmid>.scope)
+    qmmonitor/                     qm monitor pipe I/O + TTL caches, network/block/balloon guest-stats parsers
     pveconfig/                     /etc/pve parsers: user.cfg (pools), storage.cfg (storage defs)
     storage/                       statvfs wrapper, zpool list parser
     collector/                     Prometheus Collector wiring all packages together
@@ -38,15 +38,15 @@ src/
 ### Key interfaces (defined alongside their real implementations)
 
 - `procfs.ProcReader` -- process discovery and /proc/{pid}/* parsing
-- `sysfs.SysReader` -- /sys/class/net stats, /sys/block sizes
-- `qmmonitor.QMMonitor` -- `RunCommand(vmid, cmd)`, `InvalidateCache(vmid, cmd)`
+- `sysfs.SysReader` -- /sys/class/net stats, /sys/block sizes, cgroup v2 memory
+- `qmmonitor.QMMonitor` -- `RunCommand(vmid, cmd)`, `InvalidateCache(vmid, cmd)`. `RealQMMonitor` keeps a second short-TTL cache for "volatile" commands (currently only `GuestStatsCommand`)
 - `storage.StatFS` -- `Statfs(path)` for dir/nfs/cephfs sizing
 - `collector.CommandRunner` -- `Run(name, args...)` for zpool list
 - `collector.FileReaderIface` -- `ReadFile(path)` for config files
 
 ### Concurrency
 
-Bounded goroutine pool (16 workers) for parallel NIC + disk collection per VM, matching the Python ThreadPoolExecutor(max_workers=16).
+Bounded goroutine pool (16 workers) for parallel NIC + disk + guest memory collection per VM, matching the Python ThreadPoolExecutor(max_workers=16).
 
 ## Conventions
 
@@ -72,4 +72,12 @@ Bounded goroutine pool (16 workers) for parallel NIC + disk collection per VM, m
 | `--qm-max-ttl` | 600s | TTL cache for qm monitor data |
 | `--qm-rand` | 60s | Jitter range for cache expiry |
 | `--qm-monitor-defer-close` | true | Defer closing unresponsive qm sessions |
+| `--qm-guest-mem-ttl` | 30s | TTL cache for balloon guest memory stats (jitter TTL/6) |
 | `--version` | | Print version and exit |
+
+## Memory metrics
+
+- RSS-based metrics (`_kvm_memory_percent`, `_kvm_memory_extended`) overstate usage: touched guest pages stay resident on the host
+- Guest view comes from the virtio-balloon device: `qom-get /machine/peripheral/balloon0 guest-stats` via `qm monitor` (JSON, `stat-*` fields, -1 = unsupported, `last-update` unix ts). PVE itself uses `query-balloon` total_mem - free_mem, which includes guest page cache; we also export `stat-available-memory`
+- Guest metrics are skipped when balloon0 is absent (`balloon: 0`), `last-update` is 0, or older than `guestStatsMaxAge` (5m)
+- Host view `_kvm_memory_host_used_bytes` = cgroup `memory.current - memory.stat:file`, identical to PVE `memhost`

@@ -26,6 +26,31 @@ import (
 
 const maxWorkers = 16
 
+// guestStatsMaxAge bounds how old balloon guest stats may be before they are
+// dropped. PVE polls every 2s; a stale last-update means the guest driver
+// stopped reporting (unloaded, guest hung) and the values can't be trusted.
+const guestStatsMaxAge = 5 * time.Minute
+
+// guestStatMetrics maps virtio-balloon guest stats to metric name suffixes
+// (after "<prefix>_kvm_guest_memory_").
+var guestStatMetrics = []struct {
+	stat      string
+	suffix    string
+	help      string
+	valueType prometheus.ValueType
+}{
+	{"stat-total-memory", "total_bytes", "Guest-reported total memory (MemTotal)", prometheus.GaugeValue},
+	{"stat-free-memory", "free_bytes", "Guest-reported free memory (MemFree); PVE shows total - free as used", prometheus.GaugeValue},
+	{"stat-available-memory", "available_bytes", "Guest-reported available memory (MemAvailable)", prometheus.GaugeValue},
+	{"stat-disk-caches", "cached_bytes", "Guest-reported page cache (Buffers + Cached)", prometheus.GaugeValue},
+	{"stat-swap-in", "swap_in_bytes_total", "Guest memory swapped in", prometheus.CounterValue},
+	{"stat-swap-out", "swap_out_bytes_total", "Guest memory swapped out", prometheus.CounterValue},
+	{"stat-major-faults", "major_faults_total", "Guest major page faults", prometheus.CounterValue},
+	{"stat-minor-faults", "minor_faults_total", "Guest minor page faults", prometheus.CounterValue},
+	{"stat-oom-kills", "oom_kills_total", "Guest OOM killer invocations", prometheus.CounterValue},
+	{"stat-alloc-stalls", "alloc_stalls_total", "Guest memory allocation stalls", prometheus.CounterValue},
+}
+
 // PVECollector implements prometheus.Collector.
 type PVECollector struct {
 	cfg        config.Config
@@ -40,21 +65,26 @@ type PVECollector struct {
 	storageCache *cache.MtimeCache[[]pveconfig.StorageEntry]
 
 	prefix string
+	now    func() time.Time
 
 	// Pre-allocated metric descriptors for fixed-label metrics.
-	descCPU          *prometheus.Desc
-	descVcores       *prometheus.Desc
-	descMaxmem       *prometheus.Desc
-	descMemPct       *prometheus.Desc
-	descMemExt       *prometheus.Desc
-	descThreads      *prometheus.Desc
-	descCtxSwitches  *prometheus.Desc
-	descNicInfo      *prometheus.Desc
-	descNicQueues    *prometheus.Desc
-	descDiskInfo     *prometheus.Desc
-	descDiskSize     *prometheus.Desc
-	descStorageSize  *prometheus.Desc
-	descStorageFree  *prometheus.Desc
+	descCPU         *prometheus.Desc
+	descVcores      *prometheus.Desc
+	descMaxmem      *prometheus.Desc
+	descMemPct      *prometheus.Desc
+	descMemExt      *prometheus.Desc
+	descMemHostUsed *prometheus.Desc
+	descMemHostSwap *prometheus.Desc
+	descGuestMem    []*prometheus.Desc // parallel to guestStatMetrics
+	descGuestMemTS  *prometheus.Desc
+	descThreads     *prometheus.Desc
+	descCtxSwitches *prometheus.Desc
+	descNicInfo     *prometheus.Desc
+	descNicQueues   *prometheus.Desc
+	descDiskInfo    *prometheus.Desc
+	descDiskSize    *prometheus.Desc
+	descStorageSize *prometheus.Desc
+	descStorageFree *prometheus.Desc
 
 	// IO counter descriptors (counters).
 	descIOReadCount  *prometheus.Desc
@@ -113,7 +143,8 @@ func New(cfg config.Config) *PVECollector {
 	return NewWithDeps(cfg,
 		procfs.NewRealProcReader(),
 		sysfs.NewRealSysReader(),
-		qmmonitor.NewRealQMMonitor(cfg.QMTerminalTimeout, cfg.QMMaxTTL, cfg.QMRand, cfg.QMMonitorDeferClose),
+		qmmonitor.NewRealQMMonitor(cfg.QMTerminalTimeout, cfg.QMMaxTTL, cfg.QMRand, cfg.QMMonitorDeferClose,
+			cfg.QMGuestMemTTL, cfg.QMGuestMemTTL/6, qmmonitor.GuestStatsCommand),
 		storage.RealStatFS{},
 		RealCommandRunner{},
 		RealFileReader{},
@@ -134,12 +165,16 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 		cmdRunner:  cmd,
 		fileReader: fr,
 		prefix:     p,
+		now:        time.Now,
 
 		descCPU:         prometheus.NewDesc(p+"_kvm_cpu_seconds_total", "KVM CPU time", []string{"id", "mode"}, nil),
 		descVcores:      prometheus.NewDesc(p+"_kvm_vcores", "vCores allocated", []string{"id"}, nil),
 		descMaxmem:      prometheus.NewDesc(p+"_kvm_maxmem_bytes", "Maximum memory bytes", []string{"id"}, nil),
 		descMemPct:      prometheus.NewDesc(p+"_kvm_memory_percent", "Memory percent of host", []string{"id"}, nil),
 		descMemExt:      prometheus.NewDesc(p+"_kvm_memory_extended", "Extended memory info", []string{"id", "type"}, nil),
+		descMemHostUsed: prometheus.NewDesc(p+"_kvm_memory_host_used_bytes", "Host memory charged to the VM cgroup excluding page cache (PVE memhost)", []string{"id"}, nil),
+		descMemHostSwap: prometheus.NewDesc(p+"_kvm_memory_host_swap_bytes", "Host swap used by the VM cgroup", []string{"id"}, nil),
+		descGuestMemTS:  prometheus.NewDesc(p+"_kvm_guest_memory_stats_last_update_timestamp_seconds", "Time the guest last reported balloon memory stats", []string{"id"}, nil),
 		descThreads:     prometheus.NewDesc(p+"_kvm_threads", "Threads used", []string{"id"}, nil),
 		descCtxSwitches: prometheus.NewDesc(p+"_kvm_ctx_switches_total", "Context switches", []string{"id", "type"}, nil),
 		descNicInfo:     prometheus.NewDesc(p+"_kvm_nic_info", "NIC info", []string{"id", "ifname", "netdev", "queues", "type", "model", "macaddr"}, nil),
@@ -149,7 +184,7 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 			"vol_name", "pool", "pool_name", "cluster_id", "vg_name",
 			"device", "attached_to", "cache_mode", "detect_zeroes", "read_only",
 		}, nil),
-		descDiskSize: prometheus.NewDesc(p+"_kvm_disk_size_bytes", "Disk size bytes", []string{"id", "disk_name"}, nil),
+		descDiskSize:    prometheus.NewDesc(p+"_kvm_disk_size_bytes", "Disk size bytes", []string{"id", "disk_name"}, nil),
 		descStorageSize: prometheus.NewDesc(p+"_node_storage_size_bytes", "Storage total size", []string{"name", "type"}, nil),
 		descStorageFree: prometheus.NewDesc(p+"_node_storage_free_bytes", "Storage free space", []string{"name", "type"}, nil),
 
@@ -162,6 +197,10 @@ func NewWithDeps(cfg config.Config, proc procfs.ProcReader, sys sysfs.SysReader,
 
 		descScrapeDuration: prometheus.NewDesc(p+"_scrape_duration_seconds", "Duration of metrics collection", nil, nil),
 		descBuildInfo:      prometheus.NewDesc(p+"_exporter_build_info", "Build information", []string{"version"}, nil),
+	}
+	for _, m := range guestStatMetrics {
+		c.descGuestMem = append(c.descGuestMem,
+			prometheus.NewDesc(p+"_kvm_guest_memory_"+m.suffix, m.help, []string{"id"}, nil))
 	}
 	c.poolCache = cache.NewMtimeCache[poolData]("/etc/pve/user.cfg", fileMtime)
 	c.storageCache = cache.NewMtimeCache[[]pveconfig.StorageEntry]("/etc/pve/storage.cfg", fileMtime)
@@ -209,7 +248,7 @@ func (c *PVECollector) collectVMs(ch chan<- prometheus.Metric) {
 
 	for _, proc := range procs {
 		proc := proc
-		wg.Add(2)
+		wg.Add(3)
 
 		go func() {
 			sem <- struct{}{}
@@ -222,8 +261,50 @@ func (c *PVECollector) collectVMs(ch chan<- prometheus.Metric) {
 			defer func() { <-sem; wg.Done() }()
 			c.collectDiskMetrics(ch, proc)
 		}()
+
+		go func() {
+			sem <- struct{}{}
+			defer func() { <-sem; wg.Done() }()
+			c.collectGuestMemMetrics(ch, proc)
+		}()
 	}
 	wg.Wait()
+}
+
+// collectGuestMemMetrics exports memory stats reported by the guest's
+// virtio-balloon driver. Unlike host-side RSS, these reflect what the guest
+// actually uses, and MemAvailable discounts reclaimable page cache.
+func (c *PVECollector) collectGuestMemMetrics(ch chan<- prometheus.Metric, proc procfs.QEMUProcess) {
+	id := proc.VMID
+
+	raw, err := c.qm.RunCommand(id, qmmonitor.GuestStatsCommand)
+	if err != nil {
+		slog.Error("qm guest-stats", "vmid", id, "err", err)
+		return
+	}
+
+	stats, err := qmmonitor.ParseGuestStats(raw)
+	if err != nil {
+		// Expected for VMs with ballooning disabled (no balloon0 device).
+		slog.Debug("parse guest-stats", "vmid", id, "err", err)
+		return
+	}
+
+	if stats.LastUpdate <= 0 {
+		slog.Debug("guest-stats never updated (no balloon driver or polling disabled)", "vmid", id)
+		return
+	}
+	if age := c.now().Sub(time.Unix(stats.LastUpdate, 0)); age > guestStatsMaxAge {
+		slog.Debug("guest-stats stale", "vmid", id, "age", age)
+		return
+	}
+
+	ch <- prometheus.MustNewConstMetric(c.descGuestMemTS, prometheus.GaugeValue, float64(stats.LastUpdate), id)
+	for i, m := range guestStatMetrics {
+		if v, ok := stats.Get(m.stat); ok {
+			ch <- prometheus.MustNewConstMetric(c.descGuestMem[i], m.valueType, float64(v), id)
+		}
+	}
 }
 
 func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs.QEMUProcess,
@@ -269,6 +350,14 @@ func (c *PVECollector) collectVMMetrics(ch chan<- prometheus.Metric, proc procfs
 		// Context switches
 		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.CounterValue, float64(status.CtxSwitches.Voluntary), id, "voluntary")
 		ch <- prometheus.MustNewConstMetric(c.descCtxSwitches, prometheus.CounterValue, float64(status.CtxSwitches.Involuntary), id, "involuntary")
+	}
+
+	// Host-side memory from the VM's cgroup (excludes host page cache, unlike RSS-based metrics)
+	if mem, err := c.sys.ReadCgroupMemory(id); err == nil {
+		ch <- prometheus.MustNewConstMetric(c.descMemHostUsed, prometheus.GaugeValue, float64(mem.Used()), id)
+		ch <- prometheus.MustNewConstMetric(c.descMemHostSwap, prometheus.GaugeValue, float64(mem.Swap), id)
+	} else {
+		slog.Debug("read cgroup memory", "vmid", id, "err", err)
 	}
 
 	// IO counters
@@ -518,4 +607,3 @@ func sortedKeySet(m map[string]struct{}) []string {
 	slices.Sort(keys)
 	return keys
 }
-

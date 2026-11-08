@@ -141,3 +141,24 @@ func TestParseQMResponse_Empty(t *testing.T) {
 		t.Errorf("expected empty, got %q", got)
 	}
 }
+
+func TestRealQMMonitor_VolatileCache(t *testing.T) {
+	m := NewRealQMMonitor(time.Second, time.Hour, 0, false, time.Minute, 0, GuestStatsCommand)
+	if m.cacheFor(GuestStatsCommand) != m.volatileCache {
+		t.Error("guest stats command should use the volatile cache")
+	}
+	if m.cacheFor("info network") != m.cache {
+		t.Error("info network should use the default cache")
+	}
+
+	// Invalidation targets the matching cache only.
+	m.cache.Set(cacheKey("100", "info network"), "net")
+	m.volatileCache.Set(cacheKey("100", GuestStatsCommand), "stats")
+	m.InvalidateCache("100", GuestStatsCommand)
+	if _, ok := m.volatileCache.Get(cacheKey("100", GuestStatsCommand)); ok {
+		t.Error("guest stats entry should be invalidated")
+	}
+	if _, ok := m.cache.Get(cacheKey("100", "info network")); !ok {
+		t.Error("info network entry should survive")
+	}
+}

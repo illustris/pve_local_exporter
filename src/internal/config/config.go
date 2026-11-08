@@ -6,18 +6,19 @@ import (
 )
 
 type Config struct {
-	Port               int
-	Host               string
-	CollectRunningVMs  bool
-	CollectStorage     bool
-	MetricsPrefix      string
-	LogLevel           string
-	QMTerminalTimeout  time.Duration
-	QMMaxTTL           time.Duration
-	QMRand             time.Duration
+	Port                int
+	Host                string
+	CollectRunningVMs   bool
+	CollectStorage      bool
+	MetricsPrefix       string
+	LogLevel            string
+	QMTerminalTimeout   time.Duration
+	QMMaxTTL            time.Duration
+	QMRand              time.Duration
 	QMMonitorDeferClose bool
-	ShowVersion        bool
-	Version            string
+	QMGuestMemTTL       time.Duration
+	ShowVersion         bool
+	Version             string
 }
 
 func Parse() Config {
@@ -32,6 +33,7 @@ func Parse() Config {
 	flag.DurationVar(&c.QMMaxTTL, "qm-max-ttl", 600*time.Second, "cache TTL for qm monitor data")
 	flag.DurationVar(&c.QMRand, "qm-rand", 60*time.Second, "randomness for qm cache expiry")
 	flag.BoolVar(&c.QMMonitorDeferClose, "qm-monitor-defer-close", true, "defer closing unresponsive qm sessions")
+	flag.DurationVar(&c.QMGuestMemTTL, "qm-guest-mem-ttl", 30*time.Second, "cache TTL for guest memory stats from the balloon device")
 	flag.BoolVar(&c.ShowVersion, "version", false, "print the version and exit")
 	flag.Parse()
 	return c

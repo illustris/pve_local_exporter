@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
 	"pve_local_exporter/internal/config"
 	"pve_local_exporter/internal/procfs"
+	"pve_local_exporter/internal/qmmonitor"
 	"pve_local_exporter/internal/storage"
+	"pve_local_exporter/internal/sysfs"
 )
 
 // Mock implementations
@@ -44,6 +47,7 @@ func (m *mockProcReader) VMConfigExists(vmid string) bool { return true }
 type mockSysReader struct {
 	ifStats   map[string]map[string]int64
 	blockSize map[string]int64
+	cgroupMem map[string]sysfs.CgroupMemory
 }
 
 func (m *mockSysReader) ReadInterfaceStats(ifname string) (map[string]int64, error) {
@@ -51,6 +55,13 @@ func (m *mockSysReader) ReadInterfaceStats(ifname string) (map[string]int64, err
 }
 func (m *mockSysReader) GetBlockDeviceSize(devPath string) (int64, error) {
 	return m.blockSize[devPath], nil
+}
+func (m *mockSysReader) ReadCgroupMemory(vmid string) (sysfs.CgroupMemory, error) {
+	mem, ok := m.cgroupMem[vmid]
+	if !ok {
+		return sysfs.CgroupMemory{}, fmt.Errorf("no cgroup for %s", vmid)
+	}
+	return mem, nil
 }
 
 type mockQMMonitor struct {
@@ -560,5 +571,100 @@ drive-scsi1 (#block101): /mnt/storage/images/100/vm-100-disk-1.qcow2 (qcow2, rea
 	m = findMetricWithLabels(diskSize, map[string]string{"disk_name": "scsi0"})
 	if m == nil || metricValue(m) != 10737418240 {
 		t.Errorf("disk size for scsi0 = %v", m)
+	}
+}
+
+const testGuestStats = `{
+    "stats": {
+        "stat-swap-out": 0,
+        "stat-available-memory": 3628638208,
+        "stat-free-memory": 3337859072,
+        "stat-minor-faults": 295953,
+        "stat-major-faults": 419,
+        "stat-total-memory": 4102778880,
+        "stat-oom-kills": -1,
+        "stat-swap-in": 0,
+        "stat-disk-caches": 500019200
+    },
+    "last-update": 1794114458
+}`
+
+func newMemTestCollector(guestStats string, cgroup map[string]sysfs.CgroupMemory, now time.Time) *PVECollector {
+	cfg := config.Config{CollectRunningVMs: true, MetricsPrefix: "pve"}
+	proc := &mockProcReader{
+		procs: []procfs.QEMUProcess{{PID: 1234, VMID: "100", Name: "vm", Vcores: 1, MaxMem: 4194304}},
+	}
+	sys := &mockSysReader{cgroupMem: cgroup}
+	qm := &mockQMMonitor{responses: map[string]string{
+		"100:" + qmmonitor.GuestStatsCommand: guestStats,
+	}}
+	fr := &mockFileReader{files: map[string]string{"/etc/pve/user.cfg": ""}}
+	c := NewWithDeps(cfg, proc, sys, qm, &mockStatFS{}, &mockCmdRunner{}, fr)
+	c.now = func() time.Time { return now }
+	return c
+}
+
+func TestCollector_MemoryMetrics(t *testing.T) {
+	c := newMemTestCollector(testGuestStats,
+		map[string]sysfs.CgroupMemory{"100": {Current: 1061707776, File: 1474560, Swap: 8192}},
+		time.Unix(1794114458+10, 0))
+	metrics := collectMetrics(c)
+
+	for name, want := range map[string]float64{
+		"pve_kvm_memory_host_used_bytes":                           1061707776 - 1474560,
+		"pve_kvm_memory_host_swap_bytes":                           8192,
+		"pve_kvm_guest_memory_total_bytes":                         4102778880,
+		"pve_kvm_guest_memory_free_bytes":                          3337859072,
+		"pve_kvm_guest_memory_available_bytes":                     3628638208,
+		"pve_kvm_guest_memory_cached_bytes":                        500019200,
+		"pve_kvm_guest_memory_major_faults_total":                  419,
+		"pve_kvm_guest_memory_swap_in_bytes_total":                 0,
+		"pve_kvm_guest_memory_stats_last_update_timestamp_seconds": 1794114458,
+	} {
+		m := metrics[name]
+		if len(m) != 1 || metricValue(m[0]) != want {
+			t.Errorf("%s = %v, want %v", name, m, want)
+		}
+	}
+	// -1 (unsupported) and missing stats are omitted
+	for _, name := range []string{"pve_kvm_guest_memory_oom_kills_total", "pve_kvm_guest_memory_alloc_stalls_total"} {
+		if m := metrics[name]; len(m) != 0 {
+			t.Errorf("expected no %s, got %v", name, m)
+		}
+	}
+}
+
+func TestCollector_GuestMemoryUnavailable(t *testing.T) {
+	cases := map[string]struct {
+		raw string
+		now time.Time
+	}{
+		"no balloon device": {"Error: Device 'balloon0' not found", time.Unix(1794114458, 0)},
+		"never updated":     {`{"stats": {"stat-total-memory": -1}, "last-update": 0}`, time.Unix(1794114458, 0)},
+		"stale":             {testGuestStats, time.Unix(1794114458, 0).Add(guestStatsMaxAge + time.Second)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := newMemTestCollector(tc.raw,
+				map[string]sysfs.CgroupMemory{"100": {Current: 100, File: 10}}, tc.now)
+			metrics := collectMetrics(c)
+			for n := range metrics {
+				if strings.HasPrefix(n, "pve_kvm_guest_memory_") {
+					t.Errorf("unexpected guest metric %s", n)
+				}
+			}
+			// Host fallback is still present
+			if m := metrics["pve_kvm_memory_host_used_bytes"]; len(m) != 1 || metricValue(m[0]) != 90 {
+				t.Errorf("host_used_bytes = %v", m)
+			}
+		})
+	}
+}
+
+func TestCollector_NoCgroup(t *testing.T) {
+	c := newMemTestCollector("", nil, time.Now())
+	metrics := collectMetrics(c)
+	if m := metrics["pve_kvm_memory_host_used_bytes"]; len(m) != 0 {
+		t.Errorf("expected no host_used_bytes, got %v", m)
 	}
 }

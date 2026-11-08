@@ -31,6 +31,11 @@ type RealQMMonitor struct {
 	deferClose bool
 	cache      *cache.TTLCache[string, string]
 
+	// Commands whose output changes quickly (guest memory stats) use a
+	// separate cache with a much shorter TTL.
+	volatileCmds  map[string]bool
+	volatileCache *cache.TTLCache[string, string]
+
 	mu            sync.Mutex
 	deferredProcs []deferredProc
 }
@@ -40,12 +45,29 @@ type deferredProc struct {
 	timestamp time.Time
 }
 
-func NewRealQMMonitor(timeout, maxTTL, randRange time.Duration, deferClose bool) *RealQMMonitor {
-	return &RealQMMonitor{
-		timeout:    timeout,
-		deferClose: deferClose,
-		cache:      cache.NewTTLCache[string, string](maxTTL, randRange),
+// NewRealQMMonitor creates a monitor whose results are cached for maxTTL
+// (+/- randRange). Commands listed in volatileCmds are instead cached for
+// volatileTTL (+/- volatileRand).
+func NewRealQMMonitor(timeout, maxTTL, randRange time.Duration, deferClose bool,
+	volatileTTL, volatileRand time.Duration, volatileCmds ...string) *RealQMMonitor {
+	vc := make(map[string]bool, len(volatileCmds))
+	for _, c := range volatileCmds {
+		vc[c] = true
 	}
+	return &RealQMMonitor{
+		timeout:       timeout,
+		deferClose:    deferClose,
+		cache:         cache.NewTTLCache[string, string](maxTTL, randRange),
+		volatileCmds:  vc,
+		volatileCache: cache.NewTTLCache[string, string](volatileTTL, volatileRand),
+	}
+}
+
+func (m *RealQMMonitor) cacheFor(cmd string) *cache.TTLCache[string, string] {
+	if m.volatileCmds[cmd] {
+		return m.volatileCache
+	}
+	return m.cache
 }
 
 func cacheKey(vmid, cmd string) string {
@@ -53,12 +75,13 @@ func cacheKey(vmid, cmd string) string {
 }
 
 func (m *RealQMMonitor) InvalidateCache(vmid, cmd string) {
-	m.cache.Invalidate(cacheKey(vmid, cmd))
+	m.cacheFor(cmd).Invalidate(cacheKey(vmid, cmd))
 }
 
 func (m *RealQMMonitor) RunCommand(vmid, cmd string) (string, error) {
 	key := cacheKey(vmid, cmd)
-	if v, ok := m.cache.Get(key); ok {
+	c := m.cacheFor(cmd)
+	if v, ok := c.Get(key); ok {
 		slog.Debug("qm cache hit", "vmid", vmid, "cmd", cmd)
 		return v, nil
 	}
@@ -67,7 +90,7 @@ func (m *RealQMMonitor) RunCommand(vmid, cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m.cache.Set(key, result)
+	c.Set(key, result)
 	m.cleanupDeferred()
 	return result, nil
 }
